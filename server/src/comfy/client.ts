@@ -1,4 +1,4 @@
-import type { ComfyCapabilities, ConnectionTestResult } from '@comfy-mobile/shared';
+import type { ComfyCapabilities, ConnectionTestResult, WorkflowTemplate } from '@comfy-mobile/shared';
 import { Agent, fetch as undiciFetch, FormData as UndiciFormData } from 'undici';
 import type { ConfigService, ComfySettings } from '../config.js';
 import { ComfyError, toErrorMessage } from '../errors.js';
@@ -77,6 +77,13 @@ function normalizeMtime(value: unknown): number | undefined {
     if (!Number.isNaN(parsed)) return parsed;
   }
   return undefined;
+}
+
+const TEMPLATE_NAME = /^[A-Za-z0-9._-]{1,200}$/;
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
 }
 
 function normalizeUserData(data: unknown): UserDataItem[] {
@@ -331,6 +338,67 @@ export class ComfyClient {
     return normalizeUserData(data);
   }
 
+  /**
+   * Official workflow templates shipped with ComfyUI. The browser index lives
+   * outside /api and lists every bundled template with metadata.
+   */
+  async listWorkflowTemplates(timeoutMs = 30_000): Promise<WorkflowTemplate[]> {
+    const raw = await this.requestJson<unknown>(
+      '/templates/index.json',
+      { method: 'GET' },
+      timeoutMs,
+    );
+    if (!Array.isArray(raw)) return [];
+    const items = new Map<string, WorkflowTemplate>();
+    for (const groupRaw of raw) {
+      if (!groupRaw || typeof groupRaw !== 'object') continue;
+      const group = groupRaw as Record<string, unknown>;
+      const category =
+        (typeof group.title === 'string' && group.title.trim()) ||
+        (typeof group.category === 'string' && group.category.trim()) ||
+        '模板';
+      if (!Array.isArray(group.templates)) continue;
+      for (const itemRaw of group.templates) {
+        if (!itemRaw || typeof itemRaw !== 'object') continue;
+        const item = itemRaw as Record<string, unknown>;
+        const name = typeof item.name === 'string' ? item.name.trim() : '';
+        if (!name || !TEMPLATE_NAME.test(name)) continue;
+        const tags = stringList(item.tags).slice(0, 8);
+        const title =
+          (typeof item.title === 'string' && item.title.trim()) || name;
+        const description =
+          typeof item.description === 'string' ? item.description.trim().slice(0, 400) : undefined;
+        items.set(name, {
+          name,
+          title: title.slice(0, 200),
+          description,
+          category: category.slice(0, 60),
+          tags,
+          models: stringList(item.models).slice(0, 6),
+          mediaType:
+            typeof item.mediaType === 'string' ? item.mediaType.slice(0, 30) : undefined,
+          requiresApi: item.openSource === false || tags.includes('API'),
+        });
+      }
+    }
+    return [...items.values()];
+  }
+
+  async readWorkflowTemplate(name: string, timeoutMs = 60_000): Promise<unknown> {
+    if (!TEMPLATE_NAME.test(name)) {
+      throw new ComfyError(400, 'BAD_TEMPLATE', '模板名称不合法');
+    }
+    const raw = await this.requestJson<unknown>(
+      `/templates/${encodePathSegments(name)}.json`,
+      { method: 'GET' },
+      timeoutMs,
+    );
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new ComfyError(502, 'BAD_TEMPLATE', '模板文件不是合法的工作流');
+    }
+    return raw;
+  }
+
   async readWorkflow(path: string, timeoutMs = 30_000): Promise<unknown> {
     const raw = await this.requestJson<unknown>(
       `/userdata/${encodePathSegments(path)}`,
@@ -522,7 +590,13 @@ export class ComfyClient {
 
   async getView(
     file: { filename: string; subfolder?: string; type?: string },
-    options: { preview?: string; range?: string; signal?: AbortSignal; thumb?: boolean } = {},
+    options: {
+      preview?: string;
+      range?: string;
+      signal?: AbortSignal;
+      thumb?: boolean;
+      timeoutMs?: number;
+    } = {},
   ): Promise<Response> {
     const query = new URLSearchParams();
     query.set('filename', file.filename);
@@ -535,7 +609,7 @@ export class ComfyClient {
     const response = await this.request(
       `/view?${query.toString()}`,
       { method: 'GET', headers, signal: options.signal },
-      0,
+      options.timeoutMs ?? 0,
     );
     return response;
   }

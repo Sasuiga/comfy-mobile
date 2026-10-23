@@ -86,6 +86,132 @@ describe('value patching', () => {
     expect(result.prompt['8']?.inputs.image).toBe('blake3:abc');
   });
 
+  it('drops a cancelled reference-image slot and its downstream link', () => {
+    const slotField: Field = {
+      key: '8.image',
+      nodeId: '8',
+      input: 'image',
+      widgetName: 'image',
+      kind: 'image',
+      label: '参考图 #1',
+      group: 'image',
+      order: 0,
+      required: true,
+      constraints: {},
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+      skippable: true,
+    };
+    const prompt = {
+      '8': { class_type: 'LoadImage', inputs: { image: 'ref.png' } },
+      '9': {
+        class_type: 'RefDirector',
+        inputs: { prompt: 'hello', ref_image: ['8', 0] as [string, number] },
+      },
+    };
+    const result = applyValues(prompt, [slotField], { '8.image': null }, false);
+    expect(result.prompt['8']).toBeUndefined();
+    expect(result.prompt['9']?.inputs).toEqual({ prompt: 'hello' });
+
+    // Older presets used an empty string for a cancelled slot.
+    const empty = applyValues(prompt, [slotField], { '8.image': '' }, false);
+    expect(empty.prompt['8']).toBeUndefined();
+  });
+
+  it('refuses to cancel a slot that feeds a required input', () => {
+    const slotField: Field = {
+      key: '8.image',
+      nodeId: '8',
+      input: 'image',
+      widgetName: 'image',
+      kind: 'image',
+      label: '参考图 #1',
+      group: 'image',
+      order: 0,
+      required: true,
+      constraints: {},
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+      skippable: false,
+    };
+    const prompt = {
+      '8': { class_type: 'LoadImage', inputs: { image: 'ref.png' } },
+      '9': {
+        class_type: 'RefDirector',
+        inputs: { prompt: 'hello', ref_image: ['8', 0] as [string, number] },
+      },
+    };
+    expect(() => applyValues(prompt, [slotField], { '8.image': null }, false)).toThrowError(
+      /不能为空/,
+    );
+  });
+
+  it('bypasses a node and passes its matching input through', () => {
+    const nodeField: Field = {
+      key: '2.scale',
+      nodeId: '2',
+      input: 'scale',
+      widgetName: 'scale',
+      kind: 'number',
+      label: '强度',
+      group: 'advanced',
+      order: 0,
+      required: false,
+      constraints: {},
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+      nodeBypassable: true,
+    };
+    const prompt = {
+      '1': { class_type: 'BaseModel', inputs: {} },
+      '2': { class_type: 'PassNode', inputs: { model: ['1', 0], scale: 1 } },
+      '3': { class_type: 'UseModel', inputs: { model: ['2', 0] } },
+    };
+    const objectInfo = {
+      BaseModel: { output: ['MODEL'] },
+      PassNode: {
+        input: { required: { model: ['MODEL'], scale: ['FLOAT'] } },
+        input_order: { required: ['model', 'scale'] },
+        output: ['MODEL'],
+      },
+      UseModel: { input: { required: { model: ['MODEL'] } } },
+    };
+
+    const result = applyValues(prompt, [nodeField], {}, false, {
+      bypass: ['2'],
+      objectInfo,
+    });
+    expect(result.prompt['2']).toBeUndefined();
+    expect(result.prompt['3']?.inputs.model).toEqual(['1', 0]);
+  });
+
+  it('ignores bypass ids the schema does not allow', () => {
+    const nodeField: Field = {
+      key: '2.scale',
+      nodeId: '2',
+      input: 'scale',
+      widgetName: 'scale',
+      kind: 'number',
+      label: '强度',
+      group: 'advanced',
+      order: 0,
+      required: false,
+      constraints: {},
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+      nodeBypassable: false,
+    };
+    const prompt = {
+      '2': { class_type: 'PassNode', inputs: { scale: 1 } },
+    };
+    const result = applyValues(prompt, [nodeField], {}, false, { bypass: ['2'] });
+    expect(result.prompt['2']).toBeDefined();
+  });
+
   it('maps ComfyUI node errors back to field keys', () => {
     const errors = mapNodeErrors(
       {

@@ -1,7 +1,7 @@
 export const zh = {
   appName: 'Comfy 移动画布',
   nav: {
-    workflows: '工作流',
+    projects: '项目',
     history: '历史',
     settings: '设置',
   },
@@ -47,6 +47,11 @@ export const zh = {
     imported: '导入',
     fields: '个参数',
     loadFailed: '工作流加载失败',
+    media: {
+      image: '生图',
+      video: '生视频',
+      audio: '音频',
+    },
   },
   form: {
     run: '运行',
@@ -116,7 +121,7 @@ export const zh = {
     title: '设置',
     connection: 'ComfyUI 连接',
     comfyUrl: 'ComfyUI 地址',
-    comfyUrlHint: '例如 http://192.168.1.9:8188，需要包含协议和端口。',
+    comfyUrlHint: '例如 http://192.168.1.100:8188，需要包含协议和端口。',
     token: '访问令牌',
     tokenPlaceholder: '留空则保持现有令牌',
     canKeepToken: '已保存令牌，留空保持不变',

@@ -2,7 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
-import { MOCK_THUMBNAIL_PNG, MOCK_WORKFLOWS, mockObjectInfo } from './fixtures.js';
+import {
+  MOCK_TEMPLATE_INDEX,
+  MOCK_TEMPLATES,
+  MOCK_THUMBNAIL_PNG,
+  MOCK_WORKFLOWS,
+  mockObjectInfo,
+} from './fixtures.js';
 
 export interface MockComfyOptions {
   port?: number;
@@ -12,6 +18,7 @@ export interface MockComfyOptions {
   autoRun?: boolean;
   workflows?: Record<string, unknown>;
   objectInfo?: Record<string, unknown>;
+  templates?: Record<string, unknown>;
 }
 
 interface MockJob {
@@ -142,6 +149,10 @@ export async function createMockComfyServer(
 ): Promise<MockComfyServer> {
   const workflows = options.workflows ?? MOCK_WORKFLOWS;
   const objectInfo = options.objectInfo ?? (mockObjectInfo as unknown as Record<string, unknown>);
+  const templates = options.templates ?? MOCK_TEMPLATES;
+  const templateIndex = MOCK_TEMPLATE_INDEX.filter((group) =>
+    group.templates.some((item) => item.name in templates),
+  );
   const state: MockComfyState = {
     requests: [],
     prompts: new Map(),
@@ -376,6 +387,22 @@ export async function createMockComfyServer(
         };
       });
       sendJson(response, 200, items);
+      return;
+    }
+
+    if (method === 'GET' && path === '/templates/index.json') {
+      sendJson(response, 200, templateIndex);
+      return;
+    }
+
+    if (method === 'GET' && path.startsWith('/templates/') && path.endsWith('.json')) {
+      const name = decodeURIComponent(path.slice('/templates/'.length, -'.json'.length));
+      const template = templates[name];
+      if (template === undefined) {
+        sendJson(response, 404, { error: { message: 'template not found' } });
+        return;
+      }
+      sendJson(response, 200, template);
       return;
     }
 

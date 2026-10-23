@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { DEFAULT_GROUPS, FIELD_KINDS } from '@comfy-mobile/shared';
 import type {
   Field,
@@ -50,6 +50,10 @@ export function FormEditorPage() {
   usePageTitle(zh.editor.title);
   const { key = '' } = useParams<{ key: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const project = searchParams.get('project')?.trim() ?? '';
+  const projectQuery = project ? `?project=${encodeURIComponent(project)}` : '';
+  const backHref = project ? `/p/${encodeURIComponent(project)}` : '/';
   const { showToast } = useApp();
   const [detail, setDetail] = useState<WorkflowDetail | null>(null);
   const [fields, setFields] = useState<Field[]>([]);
@@ -176,7 +180,7 @@ export function FormEditorPage() {
       applyDetail(next);
       setQuery('');
       showToast('表单设置已保存', 'success');
-      if (andBack) navigate(`/w/${encodeURIComponent(key)}`);
+      if (andBack) navigate(`/w/${encodeURIComponent(key)}${projectQuery}`);
     } catch (cause) {
       setSaveError(errorMessage(cause));
     } finally {
@@ -206,7 +210,7 @@ export function FormEditorPage() {
     try {
       await api.deleteWorkflow(key);
       showToast('工作流已删除', 'success');
-      navigate('/');
+      navigate(backHref);
     } catch (cause) {
       setSaveError(errorMessage(cause));
     }
@@ -215,7 +219,7 @@ export function FormEditorPage() {
   if (loading) {
     return (
       <div className="page">
-        <PageHeader title={zh.editor.title} back={`/w/${encodeURIComponent(key)}`} />
+        <PageHeader title={zh.editor.title} back={`/w/${encodeURIComponent(key)}${projectQuery}`} />
         <div className="loading-block"><Spinner size={28} label={zh.common.loading} /></div>
       </div>
     );
@@ -224,7 +228,7 @@ export function FormEditorPage() {
   if (loadError || !detail) {
     return (
       <div className="page">
-        <PageHeader title={zh.editor.title} back="/" />
+        <PageHeader title={zh.editor.title} back={backHref} />
         <ErrorBox message={loadError ?? '工作流不存在'} onRetry={() => void load()} />
       </div>
     );
@@ -236,7 +240,7 @@ export function FormEditorPage() {
     <div className="page editor-page">
       <PageHeader
         title={zh.editor.title}
-        back={`/w/${encodeURIComponent(key)}`}
+        back={`/w/${encodeURIComponent(key)}${projectQuery}`}
         subtitle={detail.name}
       />
 

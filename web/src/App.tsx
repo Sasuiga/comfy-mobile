@@ -4,14 +4,18 @@ import { AppProvider, useApp } from './context';
 import { zh } from './i18n';
 import { BottomNav, Spinner, ToastHost } from './components/UI';
 import { Icon } from './components/Icon';
+import { AssetsPage } from './pages/AssetsPage';
 import { FormEditorPage } from './pages/FormEditorPage';
+import { GeneratePage } from './pages/GeneratePage';
 import { HistoryPage } from './pages/HistoryPage';
 import { LoginPage } from './pages/LoginPage';
+import { ProjectPage } from './pages/ProjectPage';
+import { ProjectsPage } from './pages/ProjectsPage';
 import { RunPage } from './pages/RunPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { SetupPage } from './pages/SetupPage';
+import { TemplatesPage } from './pages/TemplatesPage';
 import { WorkflowFormPage } from './pages/WorkflowFormPage';
-import { WorkflowsPage } from './pages/WorkflowsPage';
 
 function ScrollToTop(): null {
   const { pathname } = useLocation();
@@ -73,7 +77,11 @@ function AppFrame() {
         <ScrollToTop />
         <main className="app-main">
           <Routes>
-            <Route path="/" element={<WorkflowsPage />} />
+            <Route path="/" element={<ProjectsPage />} />
+            <Route path="/p/:project" element={<ProjectPage />} />
+            <Route path="/generate" element={<GeneratePage />} />
+            <Route path="/templates" element={<TemplatesPage />} />
+            <Route path="/assets" element={<AssetsPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/w/:key" element={<WorkflowFormPage />} />

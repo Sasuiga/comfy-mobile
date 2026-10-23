@@ -111,7 +111,7 @@ export function ConnectionForm({
           autoCorrect="off"
           spellCheck={false}
           autoFocus={autoFocus}
-          placeholder="http://192.168.1.9:8188"
+          placeholder="http://192.168.1.100:8188"
           value={url}
           disabled={config.locked.comfyUrl || saving}
           onChange={(event) => setUrl(event.target.value)}

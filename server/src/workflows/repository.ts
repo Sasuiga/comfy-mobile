@@ -5,6 +5,7 @@ import { AppError, toErrorMessage } from '../errors.js';
 import { decodeWorkflowKey, shortHash, validateRemoteWorkflowPath, workflowKey } from '../security.js';
 import { detectFormat } from './convert.js';
 import { parseLinearData } from './linear.js';
+import { detectWorkflowMedia } from './media.js';
 
 interface WorkflowCacheFile {
   fetchedAt: string;
@@ -53,10 +54,13 @@ export class WorkflowRepository {
   }
 
   async list(force = false): Promise<WorkflowSummary[]> {
-    if (!force && Date.now() - this.fetchedAt < LIST_TTL_MS && this.items.length) {
-      return this.items;
-    }
-    if (!force && Date.now() - this.fetchedAt < LIST_TTL_MS) {
+    const withinTtl = Date.now() - this.fetchedAt < LIST_TTL_MS;
+    // Summaries cached by an older version have no media; refresh eagerly so
+    // the picker can show image/video badges right after an upgrade.
+    const missingMedia = this.items.some(
+      (item) => item.source === 'remote' && item.media === undefined,
+    );
+    if (!force && withinTtl && !missingMedia) {
       return this.items;
     }
     if (this.loading) return this.loading;
@@ -95,10 +99,14 @@ export class WorkflowRepository {
       mtime: item.modified,
       size: item.size,
       format: cachedByPath.get(item.path)?.format,
+      media: cachedByPath.get(item.path)?.media,
       hasAppConfig: cachedByPath.get(item.path)?.hasAppConfig,
     }));
 
-    const pending = summaries.filter((item) => item.format === undefined);
+    // Older caches predate `media`, so re-read those workflows once to fill it.
+    const pending = summaries.filter(
+      (item) => item.format === undefined || item.media === undefined,
+    );
     const concurrency = 5;
     let index = 0;
     const worker = async (): Promise<void> => {
@@ -110,6 +118,7 @@ export class WorkflowRepository {
           const workflow = await this.client.readWorkflow(current.path, 15_000);
           const format = detectFormat(workflow) ?? undefined;
           current.format = format as WorkflowFormat | undefined;
+          current.media = detectWorkflowMedia(workflow, `${current.name} ${current.path}`);
           current.hasAppConfig = Boolean(parseLinearData(workflow)?.inputs.length);
         } catch {
           // Listing remains usable even if one file is broken.
@@ -132,12 +141,23 @@ export class WorkflowRepository {
     const imported: WorkflowSummary[] = [];
     for (const file of files) {
       if (!/\.json$/i.test(file)) continue;
+      // Imported files may be UI-format (e.g. official templates) or API.
+      let format: WorkflowSummary['format'] = 'api';
+      let media: WorkflowSummary['media'];
+      try {
+        const workflow = await this.store.readOrNull<unknown>(`imported/${file}`);
+        format = detectFormat(workflow) ?? 'api';
+        media = detectWorkflowMedia(workflow, file);
+      } catch {
+        // Keep the file listed; loading it later will surface the error.
+      }
       imported.push({
         key: workflowKey('imported', file),
         name: baseName(file),
         path: file,
         source: 'imported',
-        format: 'api',
+        format,
+        media,
       });
     }
     const remote = this.items.filter((item) => item.source === 'remote');
@@ -169,7 +189,8 @@ export class WorkflowRepository {
           name: baseName(decoded.path),
           path: decoded.path,
           source: 'imported',
-          format: 'api',
+          format: detectFormat(workflow) ?? 'api',
+          media: detectWorkflowMedia(workflow, decoded.path),
         },
         workflow,
       };
@@ -200,6 +221,8 @@ export class WorkflowRepository {
           mtime: cached?.mtime,
           size: cached?.size,
           format: format as WorkflowFormat | undefined,
+          media:
+            cached?.media ?? detectWorkflowMedia(workflow, `${cached?.name ?? baseName(path)} ${path}`),
           hasAppConfig: Boolean(parseLinearData(workflow)?.inputs.length),
         },
         workflow,
@@ -212,11 +235,11 @@ export class WorkflowRepository {
 
   async importWorkflow(name: string | undefined, workflow: unknown): Promise<WorkflowSummary> {
     const format = detectFormat(workflow);
-    if (format !== 'api') {
+    if (!format) {
       throw new AppError(
         400,
-        'NOT_API_WORKFLOW',
-        '导入功能只接受 ComfyUI 导出的 API 格式工作流；普通 UI 工作流可以直接从列表选择',
+        'INVALID_WORKFLOW',
+        '无法识别工作流格式，请选择 ComfyUI 保存的 UI 格式或导出的 API 格式 JSON',
       );
     }
     const rawName = (name || 'imported-workflow').trim() || 'imported-workflow';

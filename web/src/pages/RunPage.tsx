@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { RunOutput, RunRecord, RunState } from '@comfy-mobile/shared';
-import { api, errorMessage, outputUrl } from '../api';
+import { DEFAULT_PROJECT, projectDisplayTitle } from '@comfy-mobile/shared';
+import { api, assetUrl, errorMessage, outputUrl } from '../api';
 import { useApp } from '../context';
 import { Icon } from '../components/Icon';
 import {
@@ -42,6 +43,53 @@ function errorLines(run: RunRecord): string[] {
 
 function downloadName(output: RunOutput): string {
   return output.filename.split(/[\\/]/).pop() || output.filename;
+}
+
+/** Prefer the archived copy in the workspace; fall back to the ComfyUI proxy. */
+function outputSrc(runId: string, output: RunOutput): string {
+  return output.assetPath ? assetUrl(output.assetPath) : outputUrl(runId, output.key);
+}
+
+function outputDownload(runId: string, output: RunOutput): string {
+  return output.assetPath ? assetUrl(output.assetPath, true) : outputUrl(runId, output.key);
+}
+
+/**
+ * Archived outputs live in the asset workspace, but the user may delete them
+ * there. Fall back to ComfyUI if the archived file stops loading.
+ */
+function OutputImage({
+  runId,
+  output,
+  alt,
+  thumb,
+  className,
+}: {
+  runId: string;
+  output: RunOutput;
+  alt: string;
+  thumb?: boolean;
+  className?: string;
+}) {
+  const archived = output.assetPath ? assetUrl(output.assetPath) : '';
+  const fallback = outputUrl(runId, output.key, thumb);
+  const [src, setSrc] = useState(archived || fallback);
+
+  useEffect(() => {
+    setSrc(archived || fallback);
+  }, [archived, fallback]);
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={className}
+      loading={thumb ? 'lazy' : undefined}
+      onError={() => {
+        if (src !== fallback) setSrc(fallback);
+      }}
+    />
+  );
 }
 
 export function RunPage() {
@@ -169,7 +217,9 @@ export function RunPage() {
       const response = await api.submitRun({
         workflowKey: run.workflowKey,
         values: run.values,
+        project: run.project ?? DEFAULT_PROJECT,
         randomizeSeeds: true,
+        ...(run.bypassedNodes?.length ? { bypass: run.bypassedNodes } : {}),
       });
       navigate(`/runs/${response.runId}`);
     } catch (cause) {
@@ -181,9 +231,23 @@ export function RunPage() {
 
   const reuse = (): void => {
     if (!run) return;
-    navigate(`/w/${encodeURIComponent(run.workflowKey)}`, {
-      state: { values: run.values },
-    });
+    // A failed execution points at the node that broke; carry it back so the
+    // form can highlight the matching field instead of making the user guess.
+    const rawNodeId = (run.error?.details as { node_id?: unknown } | undefined)?.node_id;
+    const nodeError =
+      run.state === 'failed' && rawNodeId !== undefined && rawNodeId !== null
+        ? { nodeId: String(rawNodeId), message: run.error?.message }
+        : undefined;
+    navigate(
+      `/w/${encodeURIComponent(run.workflowKey)}?project=${encodeURIComponent(run.project ?? DEFAULT_PROJECT)}`,
+      {
+        state: {
+          values: run.values,
+          ...(run.bypassedNodes?.length ? { bypassedNodes: run.bypassedNodes } : {}),
+          ...(nodeError ? { nodeError } : {}),
+        },
+      },
+    );
   };
 
   if (loading && !run) {
@@ -204,20 +268,25 @@ export function RunPage() {
     );
   }
 
-  const percent = Math.max(0, Math.min(100, run.progress.percent || 0));
+  const rawPercent = Math.max(0, Math.min(100, run.progress.percent || 0));
+  // A finished sampling node emits 100% long before post-processing ends, so
+  // keep the bar below full while the run is still active.
+  const percent = run.state === 'running' ? Math.min(99, rawPercent) : rawPercent;
   const nodeLabel =
     run.progress.nodeLabel ??
     (run.progress.nodeId ? run.nodeLabels?.[run.progress.nodeId] : undefined) ??
     run.progress.nodeId;
   const seeds = Object.entries(run.resolvedSeeds);
   const outputs = run.outputs;
+  const project = run.project ?? DEFAULT_PROJECT;
+  const projectHref = `/p/${encodeURIComponent(project)}`;
   const currentOutput = viewer !== null ? outputs[viewer] : undefined;
   const viewerPos = viewer ?? 0;
   const imageOutputs = outputs.filter((output) => output.kind === 'image');
   const failures = errorLines(run);
 
   const share = async (output: RunOutput): Promise<void> => {
-    const url = new URL(outputUrl(run.id, output.key), window.location.href).toString();
+    const url = new URL(outputSrc(run.id, output), window.location.href).toString();
     const data = { title: output.filename, text: run.workflowName, url };
     if (typeof navigator.share === 'function') {
       try {
@@ -249,9 +318,10 @@ export function RunPage() {
     <div className="page run-page">
       <PageHeader
         title={run.workflowName}
-        back="/history"
+        back={projectHref}
         subtitle={
           <span className="header-chips">
+            <span className="project-tag">{projectDisplayTitle(project)}</span>
             <StatusBadge state={run.state} />
             <span>{zh.run.elapsed} {elapsedText(run, now)}</span>
           </span>
@@ -343,16 +413,12 @@ export function RunPage() {
                   className="output-tile"
                   onClick={() => setViewer(index)}
                 >
-                  <img
-                    src={outputUrl(run.id, output.key, true)}
-                    alt={output.filename}
-                    loading="lazy"
-                  />
+                  <OutputImage runId={run.id} output={output} alt={output.filename} thumb />
                 </button>
               ) : output.kind === 'video' ? (
                 <div className="output-tile video" key={output.key}>
                   <video
-                    src={outputUrl(run.id, output.key)}
+                    src={outputSrc(run.id, output)}
                     controls
                     playsInline
                     preload="metadata"
@@ -361,13 +427,13 @@ export function RunPage() {
               ) : output.kind === 'audio' ? (
                 <div className="output-tile audio" key={output.key}>
                   <Icon name="play" size={22} />
-                  <audio src={outputUrl(run.id, output.key)} controls preload="metadata" />
+                  <audio src={outputSrc(run.id, output)} controls preload="metadata" />
                 </div>
               ) : (
                 <a
                   className="output-tile file"
                   key={output.key}
-                  href={outputUrl(run.id, output.key)}
+                  href={outputDownload(run.id, output)}
                   download={downloadName(output)}
                 >
                   <Icon name="download" size={22} />
@@ -392,7 +458,7 @@ export function RunPage() {
         </button>
         <button type="button" className="button secondary" onClick={reuse}>
           <Icon name="edit" size={18} />
-          {zh.run.reuse}
+          {run.state === 'failed' ? '返回修改' : zh.run.reuse}
         </button>
       </div>
 
@@ -409,7 +475,7 @@ export function RunPage() {
               </button>
               <a
                 className="button secondary"
-                href={outputUrl(run.id, currentOutput.key)}
+                href={outputDownload(run.id, currentOutput)}
                 download={downloadName(currentOutput)}
               >
                 <Icon name="download" size={18} />
@@ -421,9 +487,10 @@ export function RunPage() {
       >
         {currentOutput ? (
           <div className="viewer">
-            <img
+            <OutputImage
               className="viewer-media"
-              src={outputUrl(run.id, currentOutput.key)}
+              runId={run.id}
+              output={currentOutput}
               alt={currentOutput.filename}
             />
             {imageOutputs.length > 1 ? (

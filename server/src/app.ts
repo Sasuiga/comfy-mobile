@@ -5,14 +5,17 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import type { ApiErrorBody } from '@comfy-mobile/shared';
 import { ConfigService, readRuntimeOptions, type RuntimeOptions } from './config.js';
+import { AssetStore } from './assets/store.js';
 import { ComfyClient } from './comfy/client.js';
 import { ComfySocket } from './comfy/socket.js';
 import type { AppContext } from './context.js';
 import { AppError, toErrorMessage } from './errors.js';
 import { RunManager } from './runs/manager.js';
+import { registerAssetRoutes } from './routes/assets.js';
 import { registerConfigRoutes } from './routes/config.js';
 import { registerMiscRoutes } from './routes/misc.js';
 import { registerOutputRoutes } from './routes/outputs.js';
+import { registerProjectRoutes } from './routes/projects.js';
 import { registerRunRoutes } from './routes/runs.js';
 import { registerUploadRoutes } from './routes/uploads.js';
 import { registerWorkflowRoutes } from './routes/workflows.js';
@@ -45,12 +48,14 @@ export async function buildApp(buildOptions: BuildAppOptions = {}): Promise<Buil
   const store = new JsonStore(options.dataDir);
   const configService = new ConfigService(store, options);
   await configService.load();
+  const assets = new AssetStore(configService);
+  await assets.init();
   const client = new ComfyClient(configService);
   const repository = new WorkflowRepository(store, client);
-  const workflows = new WorkflowService(store, repository, client);
+  const workflows = new WorkflowService(store, repository, client, assets);
   await workflows.load();
   const socket = new ComfySocket(client, configService);
-  const runs = new RunManager(store, client, socket, workflows, configService);
+  const runs = new RunManager(store, client, socket, workflows, configService, assets);
   await runs.load();
 
   const app = Fastify({
@@ -77,6 +82,7 @@ export async function buildApp(buildOptions: BuildAppOptions = {}): Promise<Buil
   const ctx: AppContext = {
     store,
     config: configService,
+    assets,
     client,
     socket,
     repository,
@@ -151,6 +157,8 @@ export async function buildApp(buildOptions: BuildAppOptions = {}): Promise<Buil
     async (api) => {
       registerMiscRoutes(api);
       registerConfigRoutes(api, ctx);
+      registerAssetRoutes(api, ctx);
+      registerProjectRoutes(api, ctx);
       registerWorkflowRoutes(api, ctx);
       registerUploadRoutes(api, ctx);
       registerRunRoutes(api, ctx);

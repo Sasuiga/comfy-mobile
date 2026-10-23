@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { DEFAULT_GROUPS } from '@comfy-mobile/shared';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { DEFAULT_GROUPS, DEFAULT_PROJECT, projectDisplayTitle } from '@comfy-mobile/shared';
 import type { Field, Preset, WorkflowDetail } from '@comfy-mobile/shared';
 import { api, ApiError, errorMessage } from '../api';
 import { useApp } from '../context';
 import { zh } from '../i18n';
-import { FieldControl, FieldRow } from '../components/FieldControl';
+import { FieldControl, FieldRow, type FieldNotice } from '../components/FieldControl';
 import { Icon } from '../components/Icon';
+import { MultiImageUpload } from '../components/MultiImageUpload';
+import { WorkflowWarnings } from '../components/WorkflowWarnings';
+import { parseWorkflowWarnings } from '../warnings';
 import {
   EmptyState,
   ErrorBox,
@@ -16,15 +19,99 @@ import {
   Spinner,
   usePageTitle,
 } from '../components/UI';
-import { rememberWorkflow } from './WorkflowsPage';
+import { rememberWorkflow } from '../recent';
 
 interface RunStateValues {
   values?: Record<string, unknown>;
+  /** Nodes that were bypassed when the run was submitted. */
+  bypassedNodes?: string[];
+  /** Set when the user comes back from a failed run to fix the offending node. */
+  nodeError?: { nodeId?: string; message?: string };
 }
 
 function groupLabel(id: string): string {
   const preset = DEFAULT_GROUPS.find((group) => group.id === id);
   return preset?.label ?? id;
+}
+
+function sameNodeId(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  return a === b || a.endsWith(`:${b}`) || b.endsWith(`:${a}`);
+}
+
+function isSkippedField(field: Field, value: unknown): boolean {
+  return Boolean(field.skippable) && value === null;
+}
+
+/** Display name for a node-level bypass control. */
+function nodeLabel(field: Field): string {
+  return field.nodeTitle ?? field.nodeClass ?? `节点 ${field.nodeId}`;
+}
+
+/**
+ * Conversion warnings carry a node id and an input name. Map them back to the
+ * visible fields so the form itself can show where the fix belongs instead of
+ * leaving everything in the banner at the top.
+ */
+function buildFieldNotices(
+  detail: WorkflowDetail,
+  values: Record<string, unknown>,
+): Map<string, FieldNotice> {
+  const notices = new Map<string, FieldNotice>();
+  const parsed = parseWorkflowWarnings(detail.warnings, detail.missingNodeTypes);
+  const visible = detail.fields.filter((field) => field.visible);
+  for (const item of parsed.items) {
+    if (!item.nodeId) continue;
+    const nodeFields = visible.filter((field) => sameNodeId(field.nodeId, item.nodeId));
+    if (!nodeFields.length) continue;
+
+    let targets: Field[] = [];
+    let notice: FieldNotice | undefined;
+    if (item.kind === 'asset' && !item.placeholder) {
+      targets = nodeFields.filter(
+        (field) => item.field && (field.input === item.field || field.widgetName === item.field),
+      );
+      notice = {
+        level: 'warn',
+        message: `资源缺失：${item.savedValue || '该文件'} 在当前 ComfyUI 上不存在，请重新选择`,
+      };
+    } else if (item.kind === 'param') {
+      targets = nodeFields.filter(
+        (field) => item.field && (field.input === item.field || field.widgetName === item.field),
+      );
+      notice = {
+        level: 'warn',
+        message: `选项已失效：${item.savedValue || '原值'}，已自动替换为 ${
+          item.replacement || '默认值'
+        }，请重新选择`,
+      };
+    } else if (item.kind === 'shift') {
+      targets = nodeFields;
+      notice = {
+        level: 'danger',
+        message: '参数与当前节点定义不匹配，请重新选择，或到 ComfyUI 重新保存工作流',
+      };
+    }
+    if (!notice || !targets.length) continue;
+
+    for (const field of targets) {
+      const current = values[field.key];
+      // These warnings describe the saved value. Once the user uploads or
+      // picks something else — or cancels the slot — the warning is resolved.
+      if (item.kind === 'asset') {
+        if (isSkippedField(field, current)) continue;
+        if (current !== undefined && current !== item.savedValue) continue;
+      }
+      if (item.kind === 'param' && item.replacement !== undefined) {
+        if (typeof current === 'string' && current !== item.replacement) continue;
+      }
+      const existing = notices.get(field.key);
+      if (!existing || (existing.level === 'warn' && notice.level === 'danger')) {
+        notices.set(field.key, notice);
+      }
+    }
+  }
+  return notices;
 }
 
 function defaultValues(detail: WorkflowDetail): Record<string, unknown> {
@@ -41,6 +128,10 @@ export function WorkflowFormPage() {
   const { key = '' } = useParams<{ key: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const project = searchParams.get('project')?.trim() || DEFAULT_PROJECT;
+  const projectQuery = `?project=${encodeURIComponent(project)}`;
+  const projectHref = `/p/${encodeURIComponent(project)}`;
   const { showToast } = useApp();
   const [detail, setDetail] = useState<WorkflowDetail | null>(null);
   const [values, setValues] = useState<Record<string, unknown>>({});
@@ -56,10 +147,23 @@ export function WorkflowFormPage() {
   const [presetName, setPresetName] = useState('');
   const [savingPreset, setSavingPreset] = useState(false);
   const [presetError, setPresetError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set(['advanced']));
-  const [showWarnings, setShowWarnings] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  /** Nodes the user bypassed for debugging; their fields are left out. */
+  const [bypassed, setBypassed] = useState<Set<string>>(new Set());
 
   const stateValues = (location.state as RunStateValues | null)?.values;
+  const stateBypassed = (location.state as RunStateValues | null)?.bypassedNodes;
+  const stateNodeError = (location.state as RunStateValues | null)?.nodeError;
+
+  /** Bring a field into view after its section has been expanded. */
+  const focusField = (fieldKey: string): void => {
+    window.setTimeout(() => {
+      const target = [...document.querySelectorAll<HTMLElement>('[data-field-key]')].find(
+        (element) => element.dataset.fieldKey === fieldKey,
+      );
+      target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 150);
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -67,6 +171,9 @@ export function WorkflowFormPage() {
     try {
       const next = await api.getWorkflow(key);
       setDetail(next);
+      setCollapsed(
+        new Set(next.groups.filter((group) => group.collapsed).map((group) => group.id)),
+      );
       const defaults = defaultValues(next);
       if (stateValues) {
         for (const [name, value] of Object.entries(stateValues)) {
@@ -74,6 +181,31 @@ export function WorkflowFormPage() {
         }
       }
       setValues(defaults);
+      if (stateBypassed?.length) {
+        const allowed = new Set(
+          next.fields.filter((field) => field.nodeBypassable).map((field) => field.nodeId),
+        );
+        setBypassed(new Set(stateBypassed.filter((nodeId) => allowed.has(nodeId))));
+      }
+      if (stateNodeError?.nodeId) {
+        const nodeFields = next.fields.filter(
+          (field) => field.visible && sameNodeId(field.nodeId, stateNodeError.nodeId),
+        );
+        const first = nodeFields[0];
+        if (first) {
+          setErrors({
+            [first.key]: stateNodeError.message
+              ? `节点执行失败：${stateNodeError.message}`
+              : '该节点执行失败，请检查这里的参数',
+          });
+          setCollapsed((current) => {
+            const expanded = new Set(current);
+            expanded.delete(first.group);
+            return expanded;
+          });
+          focusField(first.key);
+        }
+      }
       rememberWorkflow(key);
       const presetResponse = await api.listPresets(key).catch(() => ({ presets: [] as Preset[] }));
       setPresets(presetResponse.presets);
@@ -82,7 +214,7 @@ export function WorkflowFormPage() {
     } finally {
       setLoading(false);
     }
-  }, [key, stateValues]);
+  }, [key, stateValues, stateBypassed, stateNodeError]);
 
   useEffect(() => {
     void load();
@@ -110,12 +242,104 @@ export function WorkflowFormPage() {
     [detail],
   );
 
+  /** Conversion warnings mapped to the fields the user can actually fix. */
+  const fieldNotices = useMemo(
+    () => (detail ? buildFieldNotices(detail, values) : new Map<string, FieldNotice>()),
+    [detail, values],
+  );
+
+  const groupIssues = useMemo(() => {
+    const map = new Map<string, { count: number; level: 'warn' | 'danger' }>();
+    for (const field of visibleFields) {
+      // Bypassed nodes are not part of the prompt, so their warnings and
+      // validation errors are irrelevant for this run.
+      if (bypassed.has(field.nodeId)) continue;
+      const issue = errors[field.key]
+        ? { level: 'danger' as const }
+        : fieldNotices.get(field.key);
+      if (!issue) continue;
+      const entry = map.get(field.group) ?? { count: 0, level: 'warn' as 'warn' | 'danger' };
+      entry.count += 1;
+      if (issue.level === 'danger') entry.level = 'danger';
+      map.set(field.group, entry);
+    }
+    return map;
+  }, [visibleFields, errors, fieldNotices, bypassed]);
+
+  /**
+   * Cancelling a media slot bypasses its loader node, so it works even when a
+   * downstream node marks the input as required.
+   */
+  const toggleSlot = (field: Field): void => {
+    if (!field.skippable) {
+      showToast('该槽位不能绕过，请改为上传或选择文件', 'error');
+      return;
+    }
+    const skipped = isSkippedField(field, values[field.key]);
+    setValue(field, skipped ? '' : null);
+    if (!skipped) showToast(`已绕过「${field.label}」`, 'info');
+  };
+
+  /** Bypass a whole node, matching ComfyUI's bypass (Ctrl+B) behaviour. */
+  const toggleNodeBypass = (nodeId: string): void => {
+    const wasBypassed = bypassed.has(nodeId);
+    setBypassed((current) => {
+      const next = new Set(current);
+      if (wasBypassed) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+    showToast(
+      wasBypassed ? '已取消绕过，节点重新参与运行' : '已绕过该节点，本次运行不执行它',
+      wasBypassed ? 'success' : 'info',
+    );
+    setErrors((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const field of visibleFields) {
+        if (field.nodeId === nodeId && next[field.key]) {
+          delete next[field.key];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  };
+
+  /** Expand every section that currently holds a problem and jump to the first. */
+  const revealIssues = (keys: string[]): void => {
+    if (!keys.length || !detail) return;
+    setCollapsed((current) => {
+      const next = new Set(current);
+      for (const fieldKey of keys) {
+        const field = detail.fields.find((item) => item.key === fieldKey);
+        if (field) next.delete(field.group);
+      }
+      return next;
+    });
+    focusField(keys[0]!);
+  };
+
   const setValue = (field: Field, value: unknown): void => {
     setValues((current) => ({ ...current, [field.key]: value }));
     setErrors((current) => {
       if (!current[field.key]) return current;
       const next = { ...current };
       delete next[field.key];
+      return next;
+    });
+  };
+
+  const applyValues = (assignments: { key: string; value: unknown }[]): void => {
+    setValues((current) => {
+      const next = { ...current };
+      for (const item of assignments) next[item.key] = item.value;
+      return next;
+    });
+    setErrors((current) => {
+      if (!assignments.some((item) => current[item.key])) return current;
+      const next = { ...current };
+      for (const item of assignments) delete next[item.key];
       return next;
     });
   };
@@ -183,8 +407,16 @@ export function WorkflowFormPage() {
     if (!detail) return;
     const nextErrors: Record<string, string> = {};
     for (const field of visibleFields) {
-      if (!field.required) continue;
+      // Bypassed nodes are dropped from the prompt; their fields do not need
+      // to be filled.
+      if (bypassed.has(field.nodeId)) continue;
       const value = values[field.key];
+      // A cancelled media slot is intentionally empty (null when the slot was
+      // bypassed, "" when the file was just cleared).
+      if (field.skippable && (value === null || value === '')) {
+        continue;
+      }
+      if (!field.required) continue;
       if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
         nextErrors[field.key] = `${field.label} 不能为空`;
       }
@@ -192,6 +424,7 @@ export function WorkflowFormPage() {
     if (Object.keys(nextErrors).length) {
       setErrors(nextErrors);
       setSubmitError('请先补全必填参数');
+      revealIssues(Object.keys(nextErrors));
       return;
     }
     setSubmitting(true);
@@ -201,29 +434,37 @@ export function WorkflowFormPage() {
       const response = await api.submitRun({
         workflowKey: key,
         values,
+        project,
         randomizeSeeds,
+        ...(bypassed.size ? { bypass: [...bypassed] } : {}),
       });
       navigate(`/runs/${response.runId}`);
     } catch (cause) {
-      setSubmitError(errorMessage(cause));
+      let message = errorMessage(cause);
       if (cause instanceof ApiError && cause.code === 'NODE_ERRORS') {
         const details = cause.details as {
           nodeErrors?: Array<{ fieldKey?: string; message: string }>;
         };
         const mapped: Record<string, string> = {};
+        const unmapped: string[] = [];
         for (const item of details.nodeErrors ?? []) {
           if (item.fieldKey) mapped[item.fieldKey] = item.message;
+          else unmapped.push(item.message);
         }
-        setErrors(mapped);
-        setCollapsed((current) => {
-          const next = new Set(current);
-          for (const fieldKey of Object.keys(mapped)) {
-            const field = detail.fields.find((item) => item.key === fieldKey);
-            if (field) next.delete(field.group);
-          }
-          return next;
-        });
+        if (Object.keys(mapped).length) {
+          setErrors(mapped);
+          revealIssues(Object.keys(mapped));
+        }
+        if (unmapped.length) message = `${message}：${unmapped.join('；')}`;
+      } else if (cause instanceof ApiError) {
+        // Server-side validation attaches the field key to the error details.
+        const fieldKey = (cause.details as { key?: unknown } | undefined)?.key;
+        if (typeof fieldKey === 'string' && detail.fields.some((field) => field.key === fieldKey)) {
+          setErrors({ [fieldKey]: cause.message });
+          revealIssues([fieldKey]);
+        }
       }
+      setSubmitError(message);
     } finally {
       setSubmitting(false);
     }
@@ -232,7 +473,7 @@ export function WorkflowFormPage() {
   if (loading) {
     return (
       <div className="page">
-        <PageHeader title="加载工作流" back="/" />
+        <PageHeader title="加载工作流" back={projectHref} />
         <div className="loading-block"><Spinner size={28} label={zh.common.loading} /></div>
       </div>
     );
@@ -241,7 +482,7 @@ export function WorkflowFormPage() {
   if (loadError || !detail) {
     return (
       <div className="page">
-        <PageHeader title="工作流" back="/" />
+        <PageHeader title="工作流" back={projectHref} />
         <ErrorBox message={loadError ?? '工作流不存在'} onRetry={() => void load()} />
       </div>
     );
@@ -251,9 +492,10 @@ export function WorkflowFormPage() {
     <div className="page form-page">
       <PageHeader
         title={detail.name}
-        back="/"
+        back={projectHref}
         subtitle={
           <span className="header-chips">
+            <span className="project-tag">{projectDisplayTitle(project)}</span>
             <span className={`format-badge ${detail.hasAppConfig ? 'app' : detail.format ?? 'ui'}`}>
               {detail.hasAppConfig ? zh.workflow.appMode : detail.format === 'api' ? zh.workflow.apiFormat : zh.workflow.uiFormat}
             </span>
@@ -266,35 +508,17 @@ export function WorkflowFormPage() {
             className="icon-button"
             aria-label={zh.form.editForm}
             title={zh.form.editForm}
-            onClick={() => navigate(`/w/${encodeURIComponent(key)}/edit`)}
+            onClick={() => navigate(`/w/${encodeURIComponent(key)}/edit${projectQuery}`)}
           >
             <Icon name="edit" />
           </button>
         }
       />
 
-      {detail.warnings.length || detail.missingNodeTypes.length ? (
-        <div className="warn-banner">
-          <button type="button" onClick={() => setShowWarnings((value) => !value)}>
-            <Icon name="alert" size={18} />
-            <span>
-              工作流转换提示
-              {detail.missingNodeTypes.length ? ` · ${detail.missingNodeTypes.length} 个节点缺失` : ''}
-            </span>
-            <Icon name="chevron" size={16} className={showWarnings ? 'rotated' : ''} />
-          </button>
-          {showWarnings ? (
-            <ul>
-              {detail.missingNodeTypes.map((item) => (
-                <li key={item.nodeId}>{item.warning}</li>
-              ))}
-              {detail.warnings.map((warning, index) => (
-                <li key={`warn-${index}`}>{warning}</li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
+      <WorkflowWarnings
+        warnings={detail.warnings}
+        missingNodeTypes={detail.missingNodeTypes}
+      />
 
       {visibleFields.length === 0 ? (
         <EmptyState
@@ -305,7 +529,7 @@ export function WorkflowFormPage() {
             <button
               type="button"
               className="button secondary"
-              onClick={() => navigate(`/w/${encodeURIComponent(key)}/edit`)}
+              onClick={() => navigate(`/w/${encodeURIComponent(key)}/edit${projectQuery}`)}
             >
               {zh.form.editForm}
             </button>
@@ -350,10 +574,25 @@ export function WorkflowFormPage() {
           <div className="form-groups">
             {visibleGroups.map((group) => {
               const isCollapsed = collapsed.has(group.id);
+              const imageFields = group.fields.filter((field) => field.kind === 'image');
+              const activeImageFields = imageFields.filter(
+                (field) =>
+                  !bypassed.has(field.nodeId) && !isSkippedField(field, values[field.key]),
+              );
+              const issue = groupIssues.get(group.id);
               return (
                 <SectionCard
                   key={group.id}
                   title={group.label}
+                  tone={issue?.level}
+                  badge={
+                    issue ? (
+                      <>
+                        <Icon name="alert" size={12} />
+                        {issue.count} 项待处理
+                      </>
+                    ) : undefined
+                  }
                   actions={
                     <button
                       type="button"
@@ -376,21 +615,92 @@ export function WorkflowFormPage() {
                   {isCollapsed ? (
                     <p className="collapsed-hint">
                       {group.fields.length} 个参数已收起
+                      {issue ? ` · ${issue.count} 项待处理` : ''}
                     </p>
                   ) : (
-                    <div className="field-list">
-                      {group.fields.map((field) => (
-                        <FieldRow key={field.key} field={field} error={errors[field.key]}>
-                          <FieldControl
-                            field={field}
-                            value={values[field.key]}
-                            error={errors[field.key]}
-                            disabled={submitting}
-                            onChange={(value) => setValue(field, value)}
-                          />
-                        </FieldRow>
-                      ))}
-                    </div>
+                    <>
+                      {imageFields.length > 1 && activeImageFields.length ? (
+                        <MultiImageUpload
+                          fields={activeImageFields}
+                          values={values}
+                          disabled={submitting}
+                          project={project}
+                          onApply={applyValues}
+                        />
+                      ) : null}
+                      <div className="field-list">
+                        {group.fields.map((field, index) => {
+                          const previous = group.fields[index - 1];
+                          const startsNode = !previous || previous.nodeId !== field.nodeId;
+                          const nodeBypassed = bypassed.has(field.nodeId);
+                          const showNodeToggle = startsNode && Boolean(field.nodeBypassable);
+                          const nodeRow = showNodeToggle ? (
+                            <div
+                              className={`node-bypass${nodeBypassed ? ' is-bypassed' : ''}`}
+                            >
+                              <span className="node-bypass-label">
+                                <span>{nodeLabel(field)}</span>
+                                {field.nodeClass && field.nodeClass !== nodeLabel(field) ? (
+                                  <small>{field.nodeClass}</small>
+                                ) : null}
+                              </span>
+                              <button
+                                type="button"
+                                className={`text-button node-bypass-toggle${
+                                  nodeBypassed ? ' restore' : ''
+                                }`}
+                                title={
+                                  nodeBypassed
+                                    ? '恢复节点，使其重新参与运行'
+                                    : '绕过该节点（与 ComfyUI 的 Ctrl+B 相同），便于对比调试'
+                                }
+                                onClick={() => toggleNodeBypass(field.nodeId)}
+                              >
+                                {nodeBypassed ? '恢复节点' : '绕过'}
+                              </button>
+                            </div>
+                          ) : null;
+                          // A bypassed node is dropped from the prompt, so hide
+                          // its controls until the user restores it.
+                          if (nodeBypassed) {
+                            return (
+                              <Fragment key={field.key}>
+                                {nodeRow}
+                                {startsNode ? (
+                                  <p className="node-bypass-hint">
+                                    该节点已绕过，本次运行不会执行它。
+                                  </p>
+                                ) : null}
+                              </Fragment>
+                            );
+                          }
+                          return (
+                            <Fragment key={field.key}>
+                              {nodeRow}
+                              <FieldRow
+                                field={field}
+                                error={errors[field.key]}
+                                warning={fieldNotices.get(field.key)}
+                                skipped={isSkippedField(field, values[field.key])}
+                                onToggleSkip={
+                                  field.skippable ? () => toggleSlot(field) : undefined
+                                }
+                              >
+                                <FieldControl
+                                  field={field}
+                                  value={values[field.key]}
+                                  error={errors[field.key]}
+                                  disabled={submitting}
+                                  compact={imageFields.length > 1}
+                                  project={project}
+                                  onChange={(value) => setValue(field, value)}
+                                />
+                              </FieldRow>
+                            </Fragment>
+                          );
+                        })}
+                      </div>
+                    </>
                   )}
                 </SectionCard>
               );

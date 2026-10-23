@@ -19,6 +19,8 @@ export interface StoredConfig {
   comfyToken?: string;
   comfyHeaders?: Record<string, string>;
   comfyInsecure?: boolean;
+  /** Project root directory, relative to the browse root. */
+  assetWorkspace?: string;
 }
 
 export interface ComfySettings {
@@ -46,6 +48,8 @@ export interface RuntimeOptions {
   comfyTokenEnv?: string;
   comfyHeadersEnv?: Record<string, string>;
   comfyInsecureEnv?: boolean;
+  /** Root directory offered by the asset directory browser. */
+  assetRootEnv?: string;
 }
 
 function envBool(value: string | undefined): boolean | undefined {
@@ -117,6 +121,7 @@ export function readRuntimeOptions(env: NodeJS.ProcessEnv = process.env): Runtim
     comfyTokenEnv: env.COMFYUI_TOKEN?.trim() || undefined,
     comfyHeadersEnv: parseHeaders(env.COMFYUI_HEADERS),
     comfyInsecureEnv: envBool(env.COMFYUI_INSECURE),
+    assetRootEnv: env.ASSET_ROOT?.trim() || undefined,
   };
 }
 
@@ -154,6 +159,17 @@ export class ConfigService {
 
   get maxUploadBytes(): number {
     return Math.floor(this.options.maxUploadMb * 1024 * 1024);
+  }
+
+  get assetWorkspace(): string {
+    const value = this.stored.assetWorkspace?.trim();
+    return value || 'ComfyMobile';
+  }
+
+  async updateAssetWorkspace(workspace: string): Promise<void> {
+    const next: StoredConfig = { ...this.stored, assetWorkspace: workspace };
+    this.stored = next;
+    await this.store.write(CONFIG_PATH, next);
   }
 
   get locked(): { comfyUrl: boolean; token: boolean } {

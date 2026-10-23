@@ -20,20 +20,37 @@ export function registerRunRoutes(app: FastifyInstance, ctx: AppContext): void {
     if (body.values && Object.keys(body.values).length > 1000) {
       throw new AppError(400, 'INVALID_BODY', '参数数量过多');
     }
+    if (body.project !== undefined && typeof body.project !== 'string') {
+      throw new AppError(400, 'INVALID_BODY', 'project 必须是字符串');
+    }
+    if (body.bypass !== undefined) {
+      if (
+        !Array.isArray(body.bypass) ||
+        body.bypass.length > 500 ||
+        body.bypass.some((nodeId) => typeof nodeId !== 'string' || !nodeId)
+      ) {
+        throw new AppError(400, 'INVALID_BODY', 'bypass 必须是节点 id 数组');
+      }
+    }
     const result = await ctx.runs.submit({
       workflowKey: body.workflowKey,
       values: body.values ?? {},
+      project: body.project,
       presetId: body.presetId,
       randomizeSeeds: Boolean(body.randomizeSeeds),
+      bypass: body.bypass,
     });
     return result;
   });
 
-  app.get<{ Querystring: { limit?: string } }>('/runs', async (request) => {
-    const raw = Number(request.query.limit ?? 20);
-    const limit = Number.isFinite(raw) ? Math.max(1, Math.min(200, Math.floor(raw))) : 20;
-    return { items: ctx.runs.list(limit) };
-  });
+  app.get<{ Querystring: { limit?: string; project?: string } }>(
+    '/runs',
+    async (request) => {
+      const raw = Number(request.query.limit ?? 20);
+      const limit = Number.isFinite(raw) ? Math.max(1, Math.min(200, Math.floor(raw))) : 20;
+      return { items: ctx.runs.list(limit, request.query.project) };
+    },
+  );
 
   app.get<{ Params: { id: string } }>('/runs/:id', async (request) => {
     return ctx.runs.get(request.params.id);

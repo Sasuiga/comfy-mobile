@@ -58,9 +58,14 @@ export function BottomNav() {
   const items: Array<{ to: string; label: string; icon: IconName; match: (path: string) => boolean }> = [
     {
       to: '/',
-      label: zh.nav.workflows,
-      icon: 'grid',
-      match: (path) => path === '/' || path.startsWith('/w/'),
+      label: zh.nav.projects,
+      icon: 'folder',
+      match: (path) =>
+        path === '/' ||
+        path.startsWith('/p/') ||
+        path.startsWith('/generate') ||
+        path.startsWith('/templates') ||
+        path.startsWith('/assets'),
     },
     {
       to: '/history',
@@ -224,18 +229,26 @@ export function SectionCard({
   description,
   children,
   actions,
+  tone,
+  badge,
 }: {
   title?: string;
   description?: string;
   children: ReactNode;
   actions?: ReactNode;
+  /** Highlights the whole card when it contains a field that needs attention. */
+  tone?: 'warn' | 'danger';
+  badge?: ReactNode;
 }) {
   return (
-    <section className="section-card">
+    <section className={`section-card${tone ? ` tone-${tone}` : ''}`}>
       {title || actions ? (
         <div className="section-card-header">
           <div>
-            {title ? <h2>{title}</h2> : null}
+            <div className="section-card-title">
+              {title ? <h2>{title}</h2> : null}
+              {badge ? <span className={`section-card-badge ${tone ?? 'warn'}`}>{badge}</span> : null}
+            </div>
             {description ? <p>{description}</p> : null}
           </div>
           {actions}

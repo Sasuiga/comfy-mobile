@@ -11,6 +11,8 @@ import type {
   SubmitRunResponse,
   WorkflowDetail,
 } from '@comfy-mobile/shared';
+import { DEFAULT_PROJECT, isAssetRef } from '@comfy-mobile/shared';
+import type { AssetStore } from '../assets/store.js';
 import type { ComfyClient, HistoryEntry } from '../comfy/client.js';
 import type { ConfigService } from '../config.js';
 import type { ComfySocket, ComfySocketEvent } from '../comfy/socket.js';
@@ -130,17 +132,23 @@ function extractHistoryError(entry: HistoryEntry): RunError {
 
 function summarize(run: RunRecord): RunSummary {
   const thumbnail = run.outputs.find((output) => output.kind === 'image');
+  const thumbnailUrl = thumbnail
+    ? thumbnail.assetPath
+      ? `/api/assets/file?path=${encodeURIComponent(thumbnail.assetPath)}`
+      : `/api/outputs/${run.id}/${thumbnail.key}?thumb=1`
+    : undefined;
   return {
     id: run.id,
     promptId: run.promptId,
     workflowKey: run.workflowKey,
     workflowName: run.workflowName,
+    project: run.project ?? DEFAULT_PROJECT,
     state: run.state,
     createdAt: run.createdAt,
     finishedAt: run.finishedAt,
     outputCount: run.outputs.length,
     errorMessage: run.error?.message,
-    thumbnail: thumbnail ? `/api/outputs/${run.id}/${thumbnail.key}?thumb=1` : undefined,
+    thumbnail: thumbnailUrl,
   };
 }
 
@@ -154,6 +162,7 @@ export class RunManager {
   private readonly byPrompt = new Map<string, string>();
   private readonly persistTimers = new Map<string, NodeJS.Timeout>();
   private readonly missingSince = new Map<string, number>();
+  private readonly finalizing = new Set<string>();
   private readonly events = new EventEmitter();
   private pollTimer?: NodeJS.Timeout;
   private started = false;
@@ -164,6 +173,7 @@ export class RunManager {
     private readonly socket: ComfySocket,
     private readonly workflows: WorkflowService,
     private readonly config: ConfigService,
+    private readonly assets: AssetStore,
   ) {
     this.events.setMaxListeners(0);
   }
@@ -205,12 +215,14 @@ export class RunManager {
 
   async submit(request: SubmitRunRequest): Promise<SubmitRunResponse> {
     const randomizeSeeds = Boolean(request.randomizeSeeds);
+    const project = await this.assets.ensureProject(request.project || DEFAULT_PROJECT);
     let prepared;
     try {
       prepared = await this.workflows.prepareRun(
         request.workflowKey,
         request.values ?? {},
         randomizeSeeds,
+        request.bypass ?? [],
       );
     } catch (error) {
       throw error;
@@ -239,12 +251,14 @@ export class RunManager {
       promptId: submitted.promptId,
       workflowKey: request.workflowKey,
       workflowName: detail.name,
+      project,
       state: 'queued',
       progress: baseProgress(),
       createdAt,
       values: sanitizeValues(request.values ?? {}),
       resolvedSeeds: applied.resolvedSeeds,
       outputs: [],
+      bypassedNodes: prepared.bypass.length ? prepared.bypass : undefined,
       queuePosition: submitted.number,
       nodeLabels: runtime.nodeLabels,
     };
@@ -277,8 +291,17 @@ export class RunManager {
     return cloneRun(stored);
   }
 
-  list(limit = 20): RunSummary[] {
-    return this.summaries.slice(0, Math.max(0, Math.min(limit, MAX_RUNS))).map((item) => ({ ...item }));
+  list(limit = 20, project?: string): RunSummary[] {
+    const wanted = project?.trim();
+    const source = wanted
+      ? this.summaries.filter(
+          (item) => (item.project ?? DEFAULT_PROJECT) === wanted,
+        )
+      : this.summaries;
+    return source.slice(0, Math.max(0, Math.min(limit, MAX_RUNS))).map((item) => ({
+      ...item,
+      project: item.project ?? DEFAULT_PROJECT,
+    }));
   }
 
   async cancel(id: string): Promise<RunRecord> {
@@ -365,13 +388,22 @@ export class RunManager {
           event.data.node !== undefined && event.data.node !== null
             ? String(event.data.node)
             : run.progress.nodeId;
+        const nodeLabel = nodeId ? run.nodeLabels?.[nodeId] ?? nodeId : run.progress.nodeLabel;
+        // Decoders, previews and single-shot custom samplers emit 1/1. That is
+        // not a meaningful percentage and must not claim the run is finished.
+        if (max <= 1) {
+          run.progress = { ...run.progress, nodeId, nodeLabel, message: '执行中' };
+          this.touch(run);
+          break;
+        }
+        const stepPercent = Math.max(0, Math.min(99, (value / max) * 100));
         run.progress = {
           value,
           max,
-          percent: max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : run.progress.percent,
+          percent: Math.max(run.progress.percent, stepPercent),
           nodeId,
-          nodeLabel: nodeId ? run.nodeLabels?.[nodeId] ?? nodeId : run.progress.nodeLabel,
-          message: max > 0 ? `采样 ${value}/${max}` : '执行中',
+          nodeLabel,
+          message: `采样 ${value}/${max}`,
         };
         this.touch(run);
         break;
@@ -379,27 +411,32 @@ export class RunManager {
       case 'progress_state': {
         const nodes = event.data.nodes;
         if (nodes && typeof nodes === 'object') {
-          let bestValue = 0;
-          let bestMax = 0;
-          let label: string | undefined;
+          let best: { value: number; max: number; nodeId: string; running: boolean } | undefined;
           for (const [nodeId, raw] of Object.entries(nodes as Record<string, unknown>)) {
             if (!raw || typeof raw !== 'object') continue;
             const state = raw as Record<string, unknown>;
             const value = Number(state.value) || 0;
             const max = Number(state.max) || 0;
-            if (max > 0 && value / max >= (bestMax ? bestValue / bestMax : 0)) {
-              bestValue = value;
-              bestMax = max;
-              label = run.nodeLabels?.[nodeId] ?? nodeId;
+            if (max <= 1) continue;
+            const running = String(state.state ?? '') === 'running';
+            if (
+              !best ||
+              (running && !best.running) ||
+              (running === best.running && max > best.max)
+            ) {
+              best = { value, max, nodeId, running };
             }
           }
-          if (bestMax > 0) {
+          if (best) {
+            const stepPercent = Math.max(0, Math.min(99, (best.value / best.max) * 100));
+            const nodeLabel = run.nodeLabels?.[best.nodeId] ?? best.nodeId;
             run.progress = {
-              value: bestValue,
-              max: bestMax,
-              percent: (bestValue / bestMax) * 100,
-              nodeLabel: label,
-              message: `采样 ${bestValue}/${bestMax}`,
+              value: best.value,
+              max: best.max,
+              percent: Math.max(run.progress.percent, stepPercent),
+              nodeId: best.nodeId,
+              nodeLabel,
+              message: `采样 ${best.value}/${best.max}`,
             };
             run.state = 'running';
             this.touch(run);
@@ -551,6 +588,19 @@ export class RunManager {
   async finalizeFromHistory(run: RunRecord): Promise<void> {
     if (['completed', 'failed', 'canceled'].includes(run.state)) return;
     if (!run.promptId) return;
+    // The websocket completion event and the poller can both ask to finalize.
+    // Only the first caller may archive and transition.
+    if (this.finalizing.has(run.id)) return;
+    this.finalizing.add(run.id);
+    try {
+      await this.finalizeOnce(run);
+    } finally {
+      this.finalizing.delete(run.id);
+    }
+  }
+
+  private async finalizeOnce(run: RunRecord): Promise<void> {
+    if (!run.promptId) return;
     let entry: HistoryEntry | null = null;
     try {
       entry = await this.client.getHistory(run.promptId);
@@ -570,6 +620,7 @@ export class RunManager {
       return;
     }
     const outputs = extractOutputs(entry);
+    await this.archiveOutputs(run, outputs);
     await this.transition(run, 'completed', {
       outputs,
       finishedAt: nowIso(),
@@ -582,6 +633,46 @@ export class RunManager {
         message: '完成',
       },
     });
+  }
+
+  /**
+   * Copies every output from ComfyUI into the asset workspace. Archiving is a
+   * convenience: a failure is recorded on the output but the run still
+   * completes, and the ComfyUI copy remains available through the proxy.
+   */
+  private async archiveOutputs(run: RunRecord, outputs: RunOutput[]): Promise<void> {
+    if (!outputs.length) return;
+    const at = new Date();
+    for (const output of outputs) {
+      try {
+        const response = await this.client.getView(
+          {
+            filename: output.filename,
+            subfolder: output.subfolder,
+            type: output.comfyType,
+          },
+          { timeoutMs: 10 * 60_000 },
+        );
+        if (!response.ok) {
+          void response.body?.cancel().catch(() => undefined);
+          output.archiveError =
+            response.status === 404
+              ? 'ComfyUI 上找不到输出文件'
+              : `读取输出文件失败（HTTP ${response.status}）`;
+          continue;
+        }
+        output.assetPath = await this.assets.archiveOutput(response.body, {
+          runId: run.id,
+          workflowName: run.workflowName,
+          filename: output.filename,
+          key: output.key,
+          at,
+          project: run.project ?? DEFAULT_PROJECT,
+        });
+      } catch (error) {
+        output.archiveError = error instanceof Error ? error.message : String(error);
+      }
+    }
   }
 
   private async pollActiveRuns(): Promise<void> {
@@ -712,6 +803,14 @@ export class RunManager {
 function sanitizeValues(values: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(values)) {
+    if (isAssetRef(value)) {
+      result[key] = {
+        path: value.path,
+        ...(value.name ? { name: value.name } : {}),
+        ...(value.kind ? { kind: value.kind } : {}),
+      };
+      continue;
+    }
     if (
       typeof value === 'string' ||
       typeof value === 'number' ||

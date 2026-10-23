@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { WorkflowDetail, WorkflowSummary } from '@comfy-mobile/shared';
+import type { WorkflowDetail, WorkflowSummary, WorkflowTemplate } from '@comfy-mobile/shared';
 import { buildApp } from '../src/app.js';
 import { createMockComfyServer, type MockComfyServer } from '../src/mock/server.js';
 import { MOCK_THUMBNAIL_PNG, mockApiWorkflow } from '../src/mock/fixtures.js';
@@ -45,7 +45,7 @@ async function startApp(
   const port = typeof address === 'object' && address ? address.port : 0;
   cleanups.push(async () => {
     await built.app.close();
-    await rm(dataDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
   return { app: built.app, baseUrl: `http://127.0.0.1:${port}`, dataDir };
 }
@@ -96,6 +96,8 @@ describe('API integration with mock ComfyUI', () => {
     const uiWorkflow = items.find((item) => item.name === 'txt2img-ui');
     expect(uiWorkflow?.format).toBe('ui');
     expect(uiWorkflow?.hasAppConfig).toBe(true);
+    expect(uiWorkflow?.media).toBe('image');
+    expect(items.find((item) => item.name === 'txt2img-api')?.media).toBe('image');
 
     const detailResponse = await app.inject({
       method: 'GET',
@@ -154,7 +156,7 @@ describe('API integration with mock ComfyUI', () => {
     const historyResponse = await app.inject({ method: 'GET', url: '/api/runs?limit=10' });
     const history = historyResponse.json().items as Array<{ id: string; thumbnail?: string }>;
     expect(history[0]?.id).toBe(submitted.runId);
-    expect(history[0]?.thumbnail).toContain('/api/outputs/');
+    expect(history[0]?.thumbnail).toContain('/api/assets/file');
 
     const sseResponse = await fetch(`${baseUrl}/api/runs/${submitted.runId}/events`);
     expect(sseResponse.status).toBe(200);
@@ -248,6 +250,52 @@ describe('API integration with mock ComfyUI', () => {
     });
     expect(imported.statusCode).toBe(200);
     expect((imported.json().item as WorkflowSummary).source).toBe('imported');
+  });
+
+  it('lists official templates and imports one as a UI workflow', async () => {
+    const mock = await startMock();
+    const { app } = await startApp(mock.url);
+
+    const templatesResponse = await app.inject({ method: 'GET', url: '/api/templates' });
+    expect(templatesResponse.statusCode).toBe(200);
+    const templates = templatesResponse.json().items as WorkflowTemplate[];
+    expect(templates.map((item) => item.name).sort()).toEqual([
+      'api_portrait_template',
+      'txt2img_template',
+    ]);
+    const basic = templates.find((item) => item.name === 'txt2img_template')!;
+    expect(basic).toMatchObject({
+      title: 'Text to Image',
+      category: 'Image',
+      requiresApi: false,
+    });
+    expect(basic.models).toEqual(['sd_xl_base_1.0.safetensors']);
+    expect(templates.find((item) => item.name === 'api_portrait_template')?.requiresApi).toBe(true);
+
+    const imported = await app.inject({
+      method: 'POST',
+      url: '/api/templates/import',
+      payload: { name: 'txt2img_template' },
+    });
+    expect(imported.statusCode, imported.body).toBe(200);
+    const summary = imported.json().item as WorkflowSummary;
+    expect(summary.source).toBe('imported');
+    expect(summary.format).toBe('ui');
+    expect(summary.name).toContain('Text-to-Image');
+
+    const detail = await app.inject({
+      method: 'GET',
+      url: `/api/workflows/${encodeURIComponent(summary.key)}`,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect((detail.json() as WorkflowDetail).fields.filter((field) => field.visible)).toHaveLength(8);
+
+    const missing = await app.inject({
+      method: 'POST',
+      url: '/api/templates/import',
+      payload: { name: 'not_a_template' },
+    });
+    expect(missing.statusCode).toBe(404);
   });
 
   it('rejects unknown fields and surfaces ComfyUI node errors', async () => {

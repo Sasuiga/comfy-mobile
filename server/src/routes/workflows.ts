@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type {
+  ImportTemplateRequest,
   ImportWorkflowRequest,
   SavePresetRequest,
   WorkflowSaveFieldsRequest,
@@ -13,6 +14,18 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: AppContext): v
     const refresh = request.query.refresh === '1' || request.query.refresh === 'true';
     const items = await ctx.workflows.listWorkflows(refresh);
     return { items };
+  });
+
+  app.get<{ Querystring: { refresh?: string } }>('/templates', async (request) => {
+    const refresh = request.query.refresh === '1' || request.query.refresh === 'true';
+    return ctx.workflows.listTemplates(refresh);
+  });
+
+  app.post<{ Body: ImportTemplateRequest }>('/templates/import', async (request) => {
+    const name = typeof request.body?.name === 'string' ? request.body.name.trim() : '';
+    if (!name) throw new AppError(400, 'INVALID_BODY', '缺少模板名称');
+    const item = await ctx.workflows.importTemplate(name);
+    return { item };
   });
 
   app.get<{ Params: { key: string } }>('/workflows/:key', async (request) => {

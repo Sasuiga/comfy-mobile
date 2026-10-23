@@ -16,6 +16,7 @@ export type IconName =
   | 'plus'
   | 'image'
   | 'video'
+  | 'audio'
   | 'download'
   | 'share'
   | 'copy'
@@ -25,6 +26,7 @@ export type IconName =
   | 'trash'
   | 'arrow-up'
   | 'arrow-down'
+  | 'folder'
   | 'spark';
 
 const paths: Record<IconName, ReactNode> = {
@@ -111,6 +113,13 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M16 10l5-3v10l-5-3z" />
     </>
   ),
+  audio: (
+    <>
+      <path d="M9 17V6l10-2v11" />
+      <circle cx="6.5" cy="17.5" r="2.5" />
+      <circle cx="16.5" cy="15.5" r="2.5" />
+    </>
+  ),
   download: (
     <>
       <path d="M12 4v11" />
@@ -157,6 +166,9 @@ const paths: Record<IconName, ReactNode> = {
   ),
   'arrow-up': <path d="M12 19V5M6 11l6-6 6 6" />,
   'arrow-down': <path d="M12 5v14M6 13l6 6 6-6" />,
+  folder: (
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+  ),
   spark: (
     <>
       <path d="M12 3l1.7 4.8L18.5 9.5l-4.8 1.7L12 16l-1.7-4.8L5.5 9.5l4.8-1.7z" />

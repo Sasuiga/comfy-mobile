@@ -1,8 +1,15 @@
 import type {
   AppConfigPublic,
+  AssetBrowseResponse,
+  AssetEntry,
+  AssetListResponse,
+  AssetStorageInfo,
   ConnectionTestResult,
   FormOverrides,
+  ListTemplatesResponse,
   Preset,
+  ProjectListResponse,
+  ProjectSummary,
   RunRecord,
   RunSummary,
   SavePresetRequest,
@@ -139,6 +146,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, workflow }),
     }),
+  listTemplates: (refresh = false) =>
+    request<ListTemplatesResponse>(`/templates${refresh ? '?refresh=1' : ''}`),
+  importTemplate: (name: string) =>
+    request<{ item: WorkflowSummary }>('/templates/import', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
   deleteWorkflow: (key: string) =>
     request<{ ok: boolean }>(`/workflows/${encodeURIComponent(key)}`, { method: 'DELETE' }),
 
@@ -161,9 +175,48 @@ export const api = {
     return request<UploadResponse>('/uploads', { method: 'POST', body: form });
   },
 
+  listProjects: () => request<ProjectListResponse>('/projects'),
+  createProject: (name: string) =>
+    request<{ item: ProjectSummary }>('/projects', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+  getProject: (path: string) =>
+    request<{ item: ProjectSummary }>(`/projects/detail?path=${encodeURIComponent(path)}`),
+  deleteProject: (path: string) =>
+    request<{ ok: boolean }>(`/projects?path=${encodeURIComponent(path)}`, {
+      method: 'DELETE',
+    }),
+
+  assetInfo: () => request<AssetStorageInfo>('/assets/info'),
+  browseAssetDirs: (path = '') =>
+    request<AssetBrowseResponse>(`/assets/browse?path=${encodeURIComponent(path)}`),
+  selectAssetWorkspace: (path: string) =>
+    request<AssetStorageInfo>('/assets/select', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+  listAssets: (path = '') =>
+    request<AssetListResponse>(`/assets/list?path=${encodeURIComponent(path)}`),
+  uploadAsset: (file: File, path = 'inputs') => {
+    const form = new FormData();
+    form.append('file', file);
+    return request<{ item: AssetEntry }>(
+      `/assets/upload?path=${encodeURIComponent(path)}`,
+      { method: 'POST', body: form },
+    );
+  },
+  deleteAsset: (path: string) =>
+    request<{ ok: boolean }>(`/assets/file?path=${encodeURIComponent(path)}`, {
+      method: 'DELETE',
+    }),
+
   submitRun: (body: SubmitRunRequest) =>
     request<SubmitRunResponse>('/runs', { method: 'POST', body: JSON.stringify(body) }),
-  listRuns: (limit = 50) => request<{ items: RunSummary[] }>(`/runs?limit=${limit}`),
+  listRuns: (limit = 50, project?: string) =>
+    request<{ items: RunSummary[] }>(
+      `/runs?limit=${limit}${project ? `&project=${encodeURIComponent(project)}` : ''}`,
+    ),
   getRun: (id: string) => request<RunRecord>(`/runs/${encodeURIComponent(id)}`),
   cancelRun: (id: string) =>
     request<RunRecord>(`/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
@@ -181,4 +234,16 @@ export function outputUrl(runId: string, key: string, thumb = false): string {
   return `/api/outputs/${encodeURIComponent(runId)}/${encodeURIComponent(key)}${
     thumb ? '?thumb=1' : ''
   }`;
+}
+
+/** Serves a file from the configured project root. */
+/** Directory that a project uses for uploaded inputs or archived outputs. */
+export function projectAssetDir(project: string, section: 'inputs' | 'outputs'): string {
+  return `${project}/${section}`;
+}
+
+export function assetUrl(path: string, download = false): string {
+  const params = new URLSearchParams({ path });
+  if (download) params.set('download', '1');
+  return `/api/assets/file?${params.toString()}`;
 }

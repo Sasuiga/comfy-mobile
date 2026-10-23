@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import type { RunSummary } from '@comfy-mobile/shared';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  DEFAULT_PROJECT,
+  projectDisplayTitle,
+  type ProjectSummary,
+  type RunSummary,
+} from '@comfy-mobile/shared';
 import { api, errorMessage } from '../api';
 import { Icon } from '../components/Icon';
 import {
@@ -34,28 +39,60 @@ function formatWhen(iso: string): string {
 export function HistoryPage() {
   usePageTitle(zh.history.title);
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const filter = params.get('project') ?? '';
   const [items, setItems] = useState<RunSummary[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (silent = false) => {
-    if (!silent) setRefreshing(true);
+  const loadProjects = useCallback(async (): Promise<void> => {
     try {
-      const response = await api.listRuns(100);
-      setItems(response.items);
-      setError(null);
-    } catch (cause) {
-      if (!silent) setError(errorMessage(cause));
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+      const response = await api.listProjects();
+      setProjects(response.items);
+    } catch {
+      // The project chips are an optional filter; ignore failures.
     }
   }, []);
 
+  const load = useCallback(
+    async (silent = false) => {
+      if (!silent) setRefreshing(true);
+      try {
+        const response = await api.listRuns(100, filter || undefined);
+        setItems(response.items);
+        setError(null);
+      } catch (cause) {
+        if (!silent) setError(errorMessage(cause));
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [filter],
+  );
+
   useEffect(() => {
+    setLoading(true);
     void load(true);
   }, [load]);
+
+  useEffect(() => {
+    void loadProjects();
+  }, [loadProjects]);
+
+  const setFilter = (path: string): void => {
+    const next = new URLSearchParams(params);
+    if (path) next.set('project', path);
+    else next.delete('project');
+    setParams(next, { replace: true });
+  };
+
+  const refresh = (): void => {
+    void loadProjects();
+    void load();
+  };
 
   const hasActive = useMemo(() => items.some((item) => ACTIVE.has(item.state)), [items]);
 
@@ -72,19 +109,45 @@ export function HistoryPage() {
       <PageHeader
         large
         title={zh.history.title}
-        subtitle={items.length ? `${items.length} 次运行` : undefined}
+        subtitle={
+          items.length
+            ? `${items.length} 次运行${filter ? ` · ${filter}` : ''}`
+            : undefined
+        }
         actions={
           <button
             type="button"
             className="icon-button"
             aria-label={zh.common.refresh}
             disabled={refreshing}
-            onClick={() => void load()}
+            onClick={refresh}
           >
             {refreshing ? <Spinner size={20} /> : <Icon name="refresh" />}
           </button>
         }
       />
+
+      {projects.length ? (
+        <div className="filter-chips">
+          <button
+            type="button"
+            className={`filter-chip${filter ? '' : ' active'}`}
+            onClick={() => setFilter('')}
+          >
+            全部
+          </button>
+          {projects.map((project) => (
+            <button
+              type="button"
+              key={project.path}
+              className={`filter-chip${filter === project.path ? ' active' : ''}`}
+              onClick={() => setFilter(project.path)}
+            >
+              {project.title}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {error ? <ErrorBox message={error} onRetry={() => void load()} /> : null}
 
@@ -93,12 +156,18 @@ export function HistoryPage() {
       ) : items.length === 0 && !error ? (
         <EmptyState
           icon="history"
-          title={zh.history.empty}
+          title={filter ? '这个项目还没有运行记录' : zh.history.empty}
           hint={zh.history.emptyHint}
           action={
-            <button type="button" className="button secondary" onClick={() => navigate('/')}>
-              选择工作流
-            </button>
+            filter ? (
+              <button type="button" className="button secondary" onClick={() => setFilter('')}>
+                查看全部历史
+              </button>
+            ) : (
+              <button type="button" className="button secondary" onClick={() => navigate('/')}>
+                选择项目
+              </button>
+            )
           }
         />
       ) : (
@@ -123,6 +192,11 @@ export function HistoryPage() {
                   <StatusBadge state={item.state} />
                 </span>
                 <span className="run-card-meta">
+                  {item.project ? (
+                    <span className="run-project">
+                      {projectDisplayTitle(item.project ?? DEFAULT_PROJECT)}
+                    </span>
+                  ) : null}
                   <span>{formatWhen(item.createdAt)}</span>
                   {item.outputCount > 0 ? (
                     <span>{item.outputCount} {zh.history.resultCount}</span>

@@ -136,6 +136,16 @@ export function clearConversionCache(): void {
   cache.clear();
 }
 
+/** Progress lines have one line of space, so keep only the useful title part. */
+function progressLabel(title: string | undefined, fallback: string): string {
+  const text = (title ?? '').trim();
+  if (!text) return fallback;
+  const [prefix] = text.split(/[：:]/);
+  const context = prefix?.trim() ?? '';
+  if (context && context.length <= 20) return context;
+  return text.length > 32 ? `${text.slice(0, 32)}…` : text;
+}
+
 export function nodeLabelMap(
   workflow: unknown,
   prompt: ApiPrompt,
@@ -147,16 +157,18 @@ export function nodeLabelMap(
       if (!item || typeof item !== 'object') continue;
       const node = item as Record<string, unknown>;
       if (node.id === undefined) continue;
-      const label =
-        (typeof node.title === 'string' && node.title.trim()) ||
-        (typeof node.type === 'string' ? node.type : '');
+      const type = typeof node.type === 'string' ? node.type : '';
+      const label = progressLabel(
+        typeof node.title === 'string' ? node.title : undefined,
+        type,
+      );
       if (label) labels[String(node.id)] = label;
     }
   }
   for (const [id, node] of Object.entries(prompt)) {
     if (labels[id]) continue;
     const meta = (node as PromptNode)._meta;
-    labels[id] = meta?.title || node.class_type || id;
+    labels[id] = progressLabel(meta?.title, node.class_type || id);
   }
   return labels;
 }

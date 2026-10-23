@@ -1,16 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type {
+  Field,
   FieldOverride,
   FormOverrides,
+  ListTemplatesResponse,
   Preset,
   SavePresetRequest,
   WorkflowDetail,
   WorkflowSummary,
+  WorkflowTemplate,
 } from '@comfy-mobile/shared';
+import { isAssetRef } from '@comfy-mobile/shared';
 import type { ApiPrompt } from '../comfy/client.js';
 import type { ComfyClient } from '../comfy/client.js';
+import type { AssetStore } from '../assets/store.js';
 import type { JsonStore } from '../store/jsonStore.js';
-import { AppError } from '../errors.js';
+import { AppError, toErrorMessage } from '../errors.js';
 import { shortHash } from '../security.js';
 import { clearConversionCache, convertWorkflow, nodeLabelMap } from './convert.js';
 import type { WorkflowRepository, RawWorkflow } from './repository.js';
@@ -43,6 +48,8 @@ export interface RunPreparation {
   runtime: RuntimeWorkflow;
   applied: ApplyValuesResult;
   warnings: string[];
+  /** Bypass ids accepted for this run, after schema validation. */
+  bypass: string[];
 }
 
 function hashKey(key: string): string {
@@ -68,11 +75,15 @@ export class WorkflowService {
   private objectInfoHashValue = '';
   private objectInfoFetchedAt = 0;
   private objectInfoWarning?: string;
+  private templateCache?: { items: WorkflowTemplate[]; fetchedAt: number };
+  /** ComfyUI input value per asset path, invalidated by size + mtime. */
+  private readonly assetUploads = new Map<string, { signature: string; value: string }>();
 
   constructor(
     private readonly store: JsonStore,
     private readonly repository: WorkflowRepository,
     private readonly client: ComfyClient,
+    private readonly assets: AssetStore,
   ) {}
 
   async load(): Promise<void> {
@@ -216,20 +227,107 @@ export class WorkflowService {
     key: string,
     values: Record<string, unknown>,
     randomizeSeeds: boolean,
+    bypass: string[] = [],
   ): Promise<RunPreparation> {
     const { detail, schema, runtime } = await this.getSchema(key);
-    const applied = applyValues(runtime.prompt, schema.fields, values, randomizeSeeds);
+    const allowed = new Set(
+      schema.fields
+        .filter((field) => field.nodeBypassable || field.skippable)
+        .map((field) => field.nodeId),
+    );
+    const bypassed = new Set(bypass.filter((nodeId) => allowed.has(nodeId)));
+    const resolvedValues = await this.resolveAssetValues(schema.fields, values, bypassed);
+    const applied = applyValues(runtime.prompt, schema.fields, resolvedValues, randomizeSeeds, {
+      bypass: [...bypassed],
+      objectInfo: this.objectInfo ?? {},
+    });
     return {
       detail,
       schema,
       runtime,
       applied,
       warnings: schema.warnings,
+      bypass: [...bypassed],
     };
+  }
+
+  /**
+   * Asset inputs are stored on the configured drive. At run time each one is
+   * uploaded to ComfyUI and replaced with the value a LoadImage node expects.
+   * Uploads are cached per file signature so re-running is cheap.
+   */
+  private async resolveAssetValues(
+    fields: Field[],
+    values: Record<string, unknown>,
+    bypassed: Set<string> = new Set(),
+  ): Promise<Record<string, unknown>> {
+    const resolved = { ...values };
+    for (const field of fields) {
+      if (field.kind !== 'image') continue;
+      // Values for bypassed nodes never reach the prompt; skip the upload.
+      if (bypassed.has(field.nodeId)) continue;
+      const raw = resolved[field.key];
+      if (!isAssetRef(raw)) continue;
+      let cached = this.assetUploads.get(raw.path);
+      try {
+        const file = await this.assets.readForUpload(raw.path);
+        if (!cached || cached.signature !== file.signature) {
+          const result = await this.client.uploadFile(
+            file.buffer,
+            file.filename,
+            file.mime,
+            'input',
+          );
+          const value =
+            result.assetHash ||
+            (result.subfolder ? `${result.subfolder}/${result.name}` : result.name);
+          cached = { signature: file.signature, value };
+          this.assetUploads.set(raw.path, cached);
+        }
+      } catch (error) {
+        const status =
+          error instanceof AppError && error.statusCode < 500 ? error.statusCode : 502;
+        throw new AppError(
+          status,
+          'ASSET_PREPARE_FAILED',
+          `素材「${raw.name ?? raw.path}」无法用于运行：${toErrorMessage(error)}`,
+          { key: field.key, path: raw.path },
+        );
+      }
+      resolved[field.key] = cached.value;
+    }
+    return resolved;
   }
 
   async importWorkflow(name: string | undefined, workflow: unknown): Promise<WorkflowSummary> {
     return this.repository.importWorkflow(name, workflow);
+  }
+
+  async listTemplates(refresh = false): Promise<ListTemplatesResponse> {
+    const ttl = 10 * 60_000;
+    if (
+      refresh ||
+      !this.templateCache ||
+      Date.now() - this.templateCache.fetchedAt > ttl
+    ) {
+      const items = await this.client.listWorkflowTemplates();
+      this.templateCache = { items, fetchedAt: Date.now() };
+    }
+    return {
+      items: this.templateCache.items,
+      fetchedAt: new Date(this.templateCache.fetchedAt).toISOString(),
+    };
+  }
+
+  /** Fetch a bundled ComfyUI template and store it as a local workflow. */
+  async importTemplate(name: string): Promise<WorkflowSummary> {
+    const { items } = await this.listTemplates(false);
+    const meta = items.find((item) => item.name === name);
+    if (!meta) {
+      throw new AppError(404, 'TEMPLATE_NOT_FOUND', '模板不存在，请刷新模板列表');
+    }
+    const workflow = await this.client.readWorkflowTemplate(meta.name);
+    return this.repository.importWorkflow(meta.title, workflow);
   }
 
   async deleteImported(key: string): Promise<void> {

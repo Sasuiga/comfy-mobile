@@ -109,4 +109,105 @@ describe('form schema', () => {
     // Hidden markers remove the node entirely.
     expect(schema.fields.some((item) => item.nodeId === '3')).toBe(false);
   });
+
+  it('always marks media loader slots skippable, even for required consumers', () => {
+    const loadImage = (mockObjectInfo as Record<string, unknown>).LoadImage;
+    const prompt = {
+      '1': { class_type: 'LoadImage', inputs: { image: 'ref.png' } },
+      '2': { class_type: 'RefDirector', inputs: { prompt: 'hello', ref_image: ['1', 0] } },
+    };
+    const base = {
+      workflowKey: 'test-key',
+      summary,
+      workflow: { nodes: [] },
+      prompt,
+      overrides: null,
+      warnings: [],
+      missingNodeTypes: [],
+    };
+
+    const optional = buildFormSchema({
+      ...base,
+      objectInfo: {
+        LoadImage: loadImage,
+        RefDirector: {
+          input: {
+            required: { prompt: ['STRING', { multiline: true }] },
+            optional: { ref_image: ['IMAGE'] },
+          },
+          input_order: { required: ['prompt'], optional: ['ref_image'] },
+        },
+      } as unknown as Record<string, unknown>,
+    });
+    expect(field(optional.fields, '1.image').skippable).toBe(true);
+
+    // Cancelling a media slot is a bypass, so a required downstream input no
+    // longer blocks it; media loaders use the slot toggle instead of a
+    // node-level bypass.
+    const required = buildFormSchema({
+      ...base,
+      objectInfo: {
+        LoadImage: loadImage,
+        RefDirector: {
+          input: {
+            required: { prompt: ['STRING', { multiline: true }], ref_image: ['IMAGE'] },
+          },
+          input_order: { required: ['prompt', 'ref_image'] },
+        },
+      } as unknown as Record<string, unknown>,
+    });
+    expect(field(required.fields, '1.image').skippable).toBe(true);
+    expect(field(required.fields, '1.image').nodeBypassable).toBeUndefined();
+  });
+
+  it('marks a node bypassable only when required consumers can pass through', () => {
+    const prompt = {
+      '1': { class_type: 'BaseModel', inputs: {} },
+      '2': { class_type: 'PassNode', inputs: { model: ['1', 0], scale: 1 } },
+      '3': { class_type: 'UseModel', inputs: { model: ['2', 0] } },
+    };
+    const objectInfo = {
+      BaseModel: { output: ['MODEL'] },
+      PassNode: {
+        input: {
+          required: { model: ['MODEL'], scale: ['FLOAT', { default: 1 }] },
+        },
+        input_order: { required: ['model', 'scale'] },
+        output: ['MODEL'],
+      },
+      UseModel: {
+        input: { required: { model: ['MODEL'] } },
+        input_order: { required: ['model'] },
+      },
+    } as unknown as Record<string, unknown>;
+
+    const connected = buildFormSchema({
+      workflowKey: 'test-key',
+      summary,
+      workflow: { nodes: [] },
+      prompt,
+      objectInfo,
+      overrides: null,
+      warnings: [],
+      missingNodeTypes: [],
+    });
+    // The model input is linked, so UseModel's required link can be rerouted.
+    expect(field(connected.fields, '2.scale').nodeBypassable).toBe(true);
+
+    const disconnected = buildFormSchema({
+      workflowKey: 'test-key',
+      summary,
+      workflow: { nodes: [] },
+      prompt: {
+        ...prompt,
+        '2': { class_type: 'PassNode', inputs: { scale: 1 } },
+      },
+      objectInfo,
+      overrides: null,
+      warnings: [],
+      missingNodeTypes: [],
+    });
+    // Nothing to pass through: bypassing would break UseModel.
+    expect(field(disconnected.fields, '2.scale').nodeBypassable).toBe(false);
+  });
 });

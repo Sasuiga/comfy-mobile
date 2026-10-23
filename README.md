@@ -3,11 +3,18 @@
 A small mobile-first web UI for running workflows that are already saved in
 [ComfyUI](https://github.com/comfyanonymous/ComfyUI).
 
-- Lists workflows from ComfyUI's userdata API.
+- Organizes work into projects. A project is just a folder under the project
+  root, holding its own input assets, archived outputs and run history.
+- Lists workflows from ComfyUI's userdata API only when you are generating;
+  the home screen shows projects instead.
+- Browses ComfyUI's bundled template library and imports a template as a
+  local workflow with one tap.
 - Turns the important widgets into touch-friendly controls.
 - Understands ComfyUI App Builder (`extra.linearData`), `[UI]` node-title
   markers, and sensible automatic detection.
 - Runs workflows, shows live progress, and displays images, video and audio.
+- Keeps project files in a chosen directory, with a built-in asset browser
+  for uploading, picking, downloading and deleting files.
 - Keeps parameter presets and run history in a local JSON data directory.
 - Installs as a PWA, so it can be added to a phone's home screen.
 
@@ -57,6 +64,7 @@ Environment variables override values saved in `DATA_DIR/config.json`:
 | `HOST` | Bind address, default `0.0.0.0` |
 | `DATA_DIR` | Persistent data directory, default `data/` in the repository |
 | `WEB_DIST` | Built frontend directory, default `web/dist/` in the repository |
+| `ASSET_ROOT` | Root directory that the project root may be chosen under, default `DATA_DIR/assets` |
 | `COMFYUI_URL` | ComfyUI base URL |
 | `COMFYUI_TOKEN` | Bearer token sent to ComfyUI |
 | `COMFYUI_HEADERS` | JSON object of extra headers for ComfyUI |
@@ -67,6 +75,50 @@ Environment variables override values saved in `DATA_DIR/config.json`:
 The settings page can test a connection before saving it. Changing the
 ComfyUI URL from the UI has no effect when `COMFYUI_URL` is set in the
 environment.
+
+## Projects and assets
+
+`ASSET_ROOT` is the only directory tree the service browses. Choose a project
+root under it in **Settings → 项目存储** (default `ComfyMobile`). Every folder
+directly under that root is a project; create one from the home screen.
+
+New projects are created with a creation-date prefix, like Avalon task folders:
+typing `秋季海报` creates `20261023-秋季海报` (local date, `YYYYMMDD-`). The UI
+shows the title without the prefix, plus the creation date. Existing folders
+are never renamed, so hand-made names such as `项目A` keep working.
+
+```text
+<project root>/
+├── 默认项目/              # project-less runs and pre-project files
+│   ├── inputs/
+│   └── outputs/YYYY/MM/
+├── 20261023-秋季海报/
+│   ├── inputs/
+│   └── outputs/YYYY/MM/
+└── 项目A/                 # an older, undated folder
+    ├── inputs/
+    └── outputs/YYYY/MM/
+```
+
+- The app always keeps a `默认项目` (`DEFAULT_PROJECT`) for test workflows and
+  runs that do not specify a project. Paths starting with `inputs/` or
+  `outputs/` are treated as legacy paths and resolve inside it.
+- On first start after upgrading, existing root-level `inputs/` and
+  `outputs/` are moved into `默认项目/`. Existing names are never overwritten.
+- Files uploaded from a project or an image control are stored in that
+  project's `inputs/`, and are also uploaded to ComfyUI when a run starts
+  (cached by path, size and modification time).
+- Every file produced by a run is copied into
+  `<project>/outputs/YYYY/MM/` after the run completes. If copying fails, the
+  run still succeeds, the original ComfyUI output stays available, and the
+  output records an `archiveError`.
+- Deleting an asset removes the file immediately; deleting a project removes
+  its whole folder. There is no recycle bin. Run history is kept when a
+  project is deleted.
+- When `ASSET_ROOT` is unset or not writable, the service falls back to
+  `DATA_DIR/assets` and shows a warning on the project and settings pages.
+- `/assets` (linked from settings) still browses the whole project root for
+  troubleshooting.
 
 ## Choosing what appears in the form
 
