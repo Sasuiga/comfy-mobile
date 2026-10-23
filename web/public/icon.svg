@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Comfy 移动画布">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#182033" />
+      <stop offset="1" stop-color="#0b0d12" />
+    </linearGradient>
+    <linearGradient id="spark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b9cff" />
+      <stop offset="0.55" stop-color="#6be0c0" />
+      <stop offset="1" stop-color="#f0b46b" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  <rect x="28" y="28" width="456" height="456" rx="90" fill="none" stroke="#2a3450" stroke-width="6" />
+  <path
+    d="M256 96c10 82 38 110 120 120-82 10-110 38-120 120-10-82-38-110-120-120 82-10 110-38 120-120Z"
+    fill="url(#spark)"
+  />
+  <circle cx="368" cy="152" r="24" fill="#8b9cff" opacity="0.9" />
+  <circle cx="144" cy="360" r="16" fill="#6be0c0" opacity="0.8" />
+  <rect x="150" y="404" width="212" height="20" rx="10" fill="#2a3450" />
+</svg>

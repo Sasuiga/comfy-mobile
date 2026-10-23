@@ -1,0 +1,4 @@
+5454e1a0a42bfe5b87712e50c4ba65b57205e4bc3799937c228961c337d5e813  services/flatten-workflow.js
+639979b6c095b141063a8c44fe473fa888c8be54ccdbf7560b30388fb0da0a08  services/workflow-converter.js
+345d5fbf2894785e6e8c63d89c43f1cc8fd14ace9b3075228b4fa365eea79ed9  utils/logger.js
+1277a1f23f0b3011f91c126086fbfa0e98b6fa4bc6a402b31a44e81fba30eae7  comfyui/loader-asset-inputs.js

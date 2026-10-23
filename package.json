@@ -1,0 +1,26 @@
+{
+  "name": "comfy-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mobile-first web UI for selecting and running ComfyUI workflows",
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,magenta \"npm run dev -w @comfy-mobile/server\" \"npm run dev -w @comfy-mobile/web\"",
+    "build": "npm run build -w @comfy-mobile/web && npm run build -w @comfy-mobile/server",
+    "start": "npm run start -w @comfy-mobile/server",
+    "test": "npm run test -w @comfy-mobile/server",
+    "typecheck": "npm run typecheck -w @comfy-mobile/server && npm run typecheck -w @comfy-mobile/web",
+    "mock:comfy": "npm run mock -w @comfy-mobile/server",
+    "clean": "rm -rf server/dist web/dist data"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

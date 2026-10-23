@@ -1,0 +1,17 @@
+services:
+  comfy-mobile:
+    build: .
+    image: comfy-mobile:latest
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      DATA_DIR: /data
+      # Set this to the address at which ComfyUI is reachable from the
+      # container. It can also be configured later in the web settings page.
+      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
+      # AUTH_TOKEN: ${AUTH_TOKEN:-}
+    volumes:
+      - ./data:/data
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
