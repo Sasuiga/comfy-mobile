@@ -544,6 +544,7 @@ export function FieldRow({
   warning,
   skipped,
   onToggleSkip,
+  hideNodeTitle,
   children,
 }: {
   field: Field;
@@ -553,6 +554,8 @@ export function FieldRow({
   /** Reference-image slot cancelled by the user. */
   skipped?: boolean;
   onToggleSkip?: () => void;
+  /** The card header already names the node (模型加载 cards). */
+  hideNodeTitle?: boolean;
   children: ReactNode;
 }) {
   const warningTone = !error && warning ? warning.level : undefined;
@@ -583,10 +586,9 @@ export function FieldRow({
               {skipped ? '恢复槽位' : '取消槽位'}
             </button>
           ) : null}
-          <span className="field-kind">{zh.field[field.kind]}</span>
         </span>
       </div>
-      {field.nodeTitle ? <p className="field-node-title">{field.nodeTitle}</p> : null}
+      {field.nodeTitle && !hideNodeTitle ? <p className="field-node-title">{field.nodeTitle}</p> : null}
       {field.description && field.kind !== 'textarea' ? (
         <p className="field-desc">{field.description}</p>
       ) : null}

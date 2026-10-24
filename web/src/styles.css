@@ -595,16 +595,6 @@ input[type='number'] {
   font-size: 13px;
 }
 
-.field-kind {
-  font-size: 11px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border);
-  padding: 1px 7px;
-  border-radius: 999px;
-  white-space: nowrap;
-}
-
 .field-node-title {
   color: var(--muted);
   font-size: 11.5px;
@@ -1202,6 +1192,79 @@ input[type='number'] {
   word-break: break-all;
 }
 
+/* 模型加载: every loader node gets its own card so checkpoint/CLIP/VAE/LoRA
+   parameters never share one list. */
+.model-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.model-card {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.model-card.is-bypassed {
+  border-style: dashed;
+  border-color: rgba(124, 140, 255, 0.35);
+  background: rgba(124, 140, 255, 0.06);
+}
+
+.model-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.model-card-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.model-card-title > span {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.model-card-title > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.model-card .field-list > .field:first-child {
+  padding-top: 6px;
+}
+
+/* Umbrella heading before 可调参数 / 高级设置. */
+.tier-group-heading {
+  margin: 10px 2px 2px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.tier-group-heading h2 {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.tier-group-heading p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .section-label {
   display: flex;
   align-items: center;
@@ -1644,6 +1707,37 @@ input[type='number'] {
   flex-direction: column;
 }
 
+/* Reveals the workflow's untouched node parameters on demand. */
+.more-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin: 12px 0 4px;
+  padding: 11px 14px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.more-toggle:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.more-toggle svg {
+  transform: rotate(90deg);
+  transition: transform 0.18s ease;
+}
+
+.more-toggle.expanded svg {
+  transform: rotate(-90deg);
+}
+
 .form-page {
   padding-bottom: calc(104px + var(--safe-bottom));
 }
@@ -1801,6 +1895,38 @@ input[type='number'] {
 
 .warn-banner svg {
   flex: 0 0 auto;
+}
+
+.warn-recheck-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 0 13px 11px;
+}
+
+.warn-recheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.warn-recheck:disabled {
+  opacity: 0.7;
+}
+
+.warn-recheck-hint {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
 }
 
 .warn-body {
@@ -2327,6 +2453,53 @@ input[type='number'] {
 
 .run-card:hover {
   border-color: var(--border-strong);
+}
+
+/* Swipe left on a run to reveal its delete action. */
+.swipe-row {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  touch-action: pan-y;
+  user-select: none;
+}
+
+.swipe-content {
+  position: relative;
+  z-index: 1;
+  transition: transform 0.2s ease;
+  will-change: transform;
+}
+
+.swipe-content.dragging {
+  transition: none;
+}
+
+.swipe-action {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  width: 88px;
+}
+
+.swipe-delete {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  background: var(--danger);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.swipe-delete:disabled {
+  opacity: 0.7;
 }
 
 .run-thumb {

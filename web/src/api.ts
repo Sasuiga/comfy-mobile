@@ -4,6 +4,7 @@ import type {
   AssetEntry,
   AssetListResponse,
   AssetStorageInfo,
+  ClearRunsResponse,
   ConnectionTestResult,
   FormOverrides,
   ListTemplatesResponse,
@@ -217,7 +218,14 @@ export const api = {
     request<{ items: RunSummary[] }>(
       `/runs?limit=${limit}${project ? `&project=${encodeURIComponent(project)}` : ''}`,
     ),
+  clearRuns: (project?: string) =>
+    request<ClearRunsResponse>(
+      `/runs${project ? `?project=${encodeURIComponent(project)}` : ''}`,
+      { method: 'DELETE' },
+    ),
   getRun: (id: string) => request<RunRecord>(`/runs/${encodeURIComponent(id)}`),
+  deleteRun: (id: string) =>
+    request<{ ok: boolean }>(`/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   cancelRun: (id: string) =>
     request<RunRecord>(`/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
 

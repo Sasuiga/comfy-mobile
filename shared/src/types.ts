@@ -8,11 +8,25 @@ export type FieldKind =
   | 'image'
   | 'seed';
 
+/**
+ * How often a field is touched while preparing a run, in decreasing order:
+ * fill the content, confirm the output shape, pick the models, tweak if
+ * needed, then leave the rest alone. The form page renders one section per
+ * tier; 模型加载 additionally splits its nodes into one card each.
+ */
+export type FieldTier = 'input' | 'output' | 'model' | 'tuning' | 'advanced';
+
 export type FieldSource = 'override' | 'linear' | 'marker' | 'heuristic';
 
 export interface FieldOption {
   value: string;
   label: string;
+  /**
+   * The option value as the connected server declares it. ComfyUI combo options
+   * are not always strings (`["auto", 8, 10]`), and the value must be submitted
+   * with its original type or ComfyUI rejects it with "Value not in list".
+   */
+  rawValue?: string | number | boolean;
 }
 
 export interface FieldConstraints {
@@ -36,6 +50,8 @@ export interface Field {
   nodeTitle?: string;
   description?: string;
   group: string;
+  /** Display tier used by the run form; derived from group/input semantics. */
+  tier?: FieldTier;
   order: number;
   required: boolean;
   default?: unknown;
@@ -57,6 +73,12 @@ export interface Field {
    * can be passed through (the same rule ComfyUI's bypass mode follows).
    */
   nodeBypassable?: boolean;
+  /**
+   * True when the field is not part of the default minimal form (no App
+   * Builder list) but can be revealed under "更多参数". The saved workflow
+   * value applies when it stays collapsed.
+   */
+  more?: boolean;
 }
 
 export interface FieldGroup {
@@ -303,6 +325,14 @@ export interface SubmitRunResponse {
   promptId: string;
   resolvedSeeds: Record<string, number>;
   warnings?: string[];
+}
+
+export interface ClearRunsResponse {
+  ok: true;
+  /** History entries that were removed. */
+  removed: number;
+  /** Queued or running runs that were kept. */
+  kept: number;
 }
 
 export interface RunEvent {

@@ -73,9 +73,23 @@ export class JsonStore {
   }
 
   async remove(relativePath: string): Promise<void> {
-    await unlink(this.pathFor(relativePath)).catch((error) => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    });
+    const full = this.pathFor(relativePath);
+    // Queue behind any write already in flight for this path; otherwise that
+    // write would recreate the file right after the unlink.
+    const previous = this.locks.get(full) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() =>
+        unlink(full).catch((error: NodeJS.ErrnoException) => {
+          if (error?.code !== 'ENOENT') throw error;
+        }),
+      );
+    this.locks.set(full, next);
+    try {
+      await next;
+    } finally {
+      if (this.locks.get(full) === next) this.locks.delete(full);
+    }
   }
 
   async exists(relativePath: string): Promise<boolean> {

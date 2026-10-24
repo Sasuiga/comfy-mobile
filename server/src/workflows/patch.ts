@@ -5,9 +5,9 @@ import type { ApiPrompt, PromptNode } from '../comfy/client.js';
 import { AppError } from '../errors.js';
 import {
   getDefinition,
-  getInputSpec,
   isLinkRef,
   promptIdsFor,
+  resolveInputSpec,
   type NodeDefinition,
 } from './schema.js';
 
@@ -60,6 +60,12 @@ function typeNames(type: unknown): string[] {
     .filter(Boolean);
 }
 
+/** `model.duration` (V3 dynamic-combo leaf) addresses the `duration` input. */
+function leafInput(input: string): string {
+  const dot = input.lastIndexOf('.');
+  return dot >= 0 && dot < input.length - 1 ? input.slice(dot + 1) : input;
+}
+
 function inputNamesInOrder(def: NodeDefinition | undefined, node: PromptNode): string[] {
   const ordered = [
     ...(def?.input_order?.required ?? []),
@@ -102,7 +108,7 @@ export function bypassNode(
     const matches = (name: string): [string | number, number] | undefined => {
       const value = node.inputs[name];
       if (!isLinkValue(value)) return undefined;
-      const types = typeNames(getInputSpec(def, name)?.type);
+      const types = typeNames(resolveInputSpec(def, node.inputs, name)?.type);
       return types.some((type) => wanted.includes(type)) ? value : undefined;
     };
     // Same-index first so paired inputs (start/end images) keep their order.
@@ -179,12 +185,22 @@ function coerce(field: Field, raw: unknown): unknown {
     case 'select': {
       const value = String(raw);
       const options = field.constraints.options ?? [];
-      if (options.length && !options.some((option) => option.value === value)) {
+      // An optional combo may be deliberately left unselected; the form sends
+      // "" for that choice. Requiring it to match an option would reject the
+      // only way to clear the field.
+      if (value === '' && !field.required) return value;
+      const option = options.find((candidate) => candidate.value === value);
+      if (options.length && !option) {
         throw new AppError(400, 'INVALID_OPTION', `${field.label} 的选项已失效，请重新选择`, {
           key: field.key,
           value,
         });
       }
+      // ComfyUI combo options may be numbers or booleans (`["auto", 8, 10]`);
+      // submitting the stringified form makes ComfyUI reject it with
+      // "Value not in list", so restore the declared type when we know it.
+      if (option?.rawValue !== undefined) return option.rawValue;
+      if (!options.length && (typeof raw === 'number' || typeof raw === 'boolean')) return raw;
       return value;
     }
     case 'image': {
@@ -348,24 +364,54 @@ export function mapNodeErrors(details: unknown, fields: Field[]): MappedNodeErro
     }
     for (const error of errors) {
       const item = error && typeof error === 'object' ? (error as JsonRecord) : {};
-      const message =
+      let message =
         typeof item.message === 'string'
           ? item.message
           : typeof item.details === 'string'
             ? item.details
             : '参数不合法';
+      // ComfyUI reports the offending input under extra_info.input_name (older
+      // builds also put it at the top level). Without it the error lands on the
+      // node's first visible field, which is how a bad `bit_depth` value could
+      // show up under 帧率.
+      const extraInfo =
+        item.extra_info && typeof item.extra_info === 'object'
+          ? (item.extra_info as JsonRecord)
+          : undefined;
       const inputName =
         typeof item.input_name === 'string'
           ? item.input_name
           : typeof item.input === 'string'
             ? item.input
-            : undefined;
+            : typeof extraInfo?.input_name === 'string'
+              ? extraInfo.input_name
+              : undefined;
+      const inputLeaf = inputName ? leafInput(inputName) : undefined;
+      const matchesInput = (candidate: Field): boolean =>
+        Boolean(inputName) &&
+        (candidate.input === inputName || leafInput(candidate.input) === inputLeaf);
+      // A known input with no matching widget is a structural problem (e.g. a
+      // linked `image` that lost its upstream loader). Never place it on an
+      // unrelated field like the node's first slider; leave it node-level and
+      // name the input in the message instead.
+      const matched = inputName
+        ? nodeFields.find((candidate) => candidate.visible && matchesInput(candidate)) ||
+          nodeFields.find(matchesInput)
+        : undefined;
       const field =
-        (inputName &&
-          (nodeFields.find((candidate) => candidate.visible && candidate.input === inputName) ||
-            nodeFields.find((candidate) => candidate.input === inputName))) ||
-        nodeFields.find((candidate) => candidate.visible) ||
-        nodeFields[0];
+        matched ??
+        (inputName
+          ? undefined
+          : nodeFields.find((candidate) => candidate.visible) || nodeFields[0]);
+      if (!field && inputName) {
+        const nodeLabel =
+          nodeFields[0]?.nodeTitle ?? nodeFields[0]?.nodeClass ?? `节点 ${nodeId}`;
+        const missingRequired =
+          item.type === 'required_input_missing' || /required input is missing/i.test(message);
+        message = missingRequired
+          ? `缺少必填输入 ${inputName}（${nodeLabel}），通常是上游素材槽位被取消或节点被绕过`
+          : `${message}（${nodeLabel} · ${inputName}）`;
+      }
       mapped.push({
         nodeId,
         fieldKey: field?.key,

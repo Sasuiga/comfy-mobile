@@ -52,8 +52,23 @@ export function registerRunRoutes(app: FastifyInstance, ctx: AppContext): void {
     },
   );
 
+  app.delete<{ Querystring: { project?: string } }>('/runs', async (request) => {
+    const project =
+      typeof request.query.project === 'string' ? request.query.project.trim() : '';
+    if (project.length > 200) {
+      throw new AppError(400, 'INVALID_BODY', '项目路径过长');
+    }
+    const result = await ctx.runs.clear(project || undefined);
+    return { ok: true, ...result };
+  });
+
   app.get<{ Params: { id: string } }>('/runs/:id', async (request) => {
     return ctx.runs.get(request.params.id);
+  });
+
+  app.delete<{ Params: { id: string } }>('/runs/:id', async (request) => {
+    await ctx.runs.remove(request.params.id);
+    return { ok: true };
   });
 
   app.post<{ Params: { id: string } }>('/runs/:id/cancel', async (request) => {

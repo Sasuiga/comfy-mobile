@@ -135,6 +135,23 @@ function isRedirect(status: number): boolean {
   return status >= 300 && status < 400;
 }
 
+/**
+ * A freshly installed ComfyUI has no `user/default/workflows` directory until
+ * the first workflow is saved, and its userdata route answers 404
+ * "Directory not found". That is an empty list, not a broken connection.
+ */
+function isMissingUserDirectory(error: unknown): boolean {
+  if (!(error instanceof ComfyError) || error.statusCode !== 404) return false;
+  const details = error.details;
+  const body =
+    details && typeof details === 'object' && typeof (details as { body?: unknown }).body === 'string'
+      ? (details as { body: string }).body
+      : typeof details === 'string'
+        ? details
+        : '';
+  return /directory not found/i.test(`${error.message} ${body}`);
+}
+
 function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
@@ -330,12 +347,17 @@ export class ComfyClient {
   }
 
   async listWorkflows(timeoutMs = 20_000): Promise<UserDataItem[]> {
-    const data = await this.requestJson<unknown>(
-      '/userdata?dir=workflows&recurse=true&full_info=true',
-      { method: 'GET' },
-      timeoutMs,
-    );
-    return normalizeUserData(data);
+    try {
+      const data = await this.requestJson<unknown>(
+        '/userdata?dir=workflows&recurse=true&full_info=true',
+        { method: 'GET' },
+        timeoutMs,
+      );
+      return normalizeUserData(data);
+    } catch (error) {
+      if (isMissingUserDirectory(error)) return [];
+      throw error;
+    }
   }
 
   /**
@@ -400,8 +422,11 @@ export class ComfyClient {
   }
 
   async readWorkflow(path: string, timeoutMs = 30_000): Promise<unknown> {
+    // ComfyUI serves userdata as `/userdata/{file}`, a single path segment, so
+    // the whole file path has to be URL-encoded ("workflows%2Fname.json").
+    // Leaving the slashes literal makes the route miss and answer 404.
     const raw = await this.requestJson<unknown>(
-      `/userdata/${encodePathSegments(path)}`,
+      `/userdata/${encodeURIComponent(path)}`,
       { method: 'GET' },
       timeoutMs,
     );
@@ -669,15 +694,13 @@ export class ComfyClient {
           signal: AbortSignal.timeout(timeout),
           ...(dispatcher ? { dispatcher } : {}),
         } as never)) as unknown as Response;
+        const text = await response.text();
         let data: unknown;
-        if (response.ok) {
-          const text = await response.text();
-          if (text.trim()) {
-            try {
-              data = JSON.parse(text);
-            } catch {
-              data = text;
-            }
+        if (text.trim()) {
+          try {
+            data = JSON.parse(text);
+          } catch {
+            data = text;
           }
         }
         return { ok: response.ok, data, status: response.status };
@@ -705,7 +728,11 @@ export class ComfyClient {
     }
 
     capabilities.systemStats = stats.ok;
-    capabilities.userdata = workflows.ok;
+    const workflowsMissing =
+      !workflows.ok &&
+      workflows.status === 404 &&
+      /directory not found/i.test(String(workflows.data ?? ''));
+    capabilities.userdata = workflows.ok || workflowsMissing;
     capabilities.historyV2 = historyV2.ok;
     capabilities.jobs = jobs.ok;
     capabilities.websocket = true;
@@ -720,11 +747,18 @@ export class ComfyClient {
 
     const workflowCount = workflows.ok
       ? normalizeUserData(workflows.data).length
-      : undefined;
+      : workflowsMissing
+        ? 0
+        : undefined;
 
     let warning: string | undefined;
-    if (!workflows.ok) warning = 'ComfyUI 可访问，但无法读取工作流列表，请确认用户目录接口可用';
-    else if (!stats.ok) warning = 'ComfyUI 可访问，但无法读取版本信息';
+    if (workflowsMissing) {
+      warning = 'ComfyUI 上还没有保存任何工作流；在 ComfyUI 中保存后刷新即可';
+    } else if (!workflows.ok) {
+      warning = 'ComfyUI 可访问，但无法读取工作流列表，请确认用户目录接口可用';
+    } else if (!stats.ok) {
+      warning = 'ComfyUI 可访问，但无法读取版本信息';
+    }
 
     return {
       ok: true,

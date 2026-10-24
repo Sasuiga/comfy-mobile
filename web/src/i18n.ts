@@ -98,6 +98,7 @@ export const zh = {
     empty: '还没有运行记录',
     emptyHint: '从工作流页面运行一次，结果会出现在这里。',
     resultCount: '个结果',
+    clear: '清空历史',
     loadFailed: '历史记录加载失败',
   },
   editor: {

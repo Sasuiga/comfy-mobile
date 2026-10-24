@@ -231,4 +231,144 @@ describe('value patching', () => {
       message: 'bad text',
     });
   });
+
+  it('submits numeric combo options with their declared type', () => {
+    const selectField: Field = {
+      key: '9.bit_depth',
+      nodeId: '9',
+      input: 'bit_depth',
+      widgetName: 'bit_depth',
+      kind: 'select',
+      label: '位深',
+      group: 'video',
+      order: 0,
+      required: false,
+      constraints: {
+        options: [
+          { value: 'auto', label: 'auto' },
+          { value: '8', label: '8', rawValue: 8 },
+        ],
+      },
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+    };
+    const prompt = {
+      '9': { class_type: 'CreateVideo', inputs: { bit_depth: 8 } },
+    };
+    const result = applyValues(prompt, [selectField], { '9.bit_depth': '8' }, false);
+    expect(result.prompt['9']?.inputs.bit_depth).toBe(8);
+  });
+
+  it('lets an optional combo be cleared', () => {
+    const selectField: Field = {
+      key: '9.mode',
+      nodeId: '9',
+      input: 'mode',
+      widgetName: 'mode',
+      kind: 'select',
+      label: '模式',
+      group: 'advanced',
+      order: 0,
+      required: false,
+      constraints: { options: [{ value: 'a', label: 'a' }] },
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+    };
+    const result = applyValues(
+      { '9': { class_type: 'SomeNode', inputs: { mode: 'a' } } },
+      [selectField],
+      { '9.mode': '' },
+      false,
+    );
+    expect(result.prompt['9']?.inputs.mode).toBe('');
+  });
+
+  it('keeps a missing linked input node-level instead of blaming a widget', () => {
+    const megapixels: Field = {
+      key: '36.megapixels',
+      nodeId: '36',
+      nodeClass: 'ImageScaleToTotalPixels',
+      input: 'megapixels',
+      widgetName: 'megapixels',
+      kind: 'slider',
+      label: '像素数量',
+      group: 'upscale',
+      tier: 'tuning',
+      order: 0,
+      required: true,
+      constraints: { min: 0.01, max: 16, step: 0.01 },
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+    };
+    const errors = mapNodeErrors(
+      {
+        node_errors: {
+          '36': {
+            class_type: 'ImageScaleToTotalPixels',
+            errors: [
+              {
+                type: 'required_input_missing',
+                message: 'Required input is missing',
+                extra_info: { input_name: 'image' },
+              },
+            ],
+          },
+        },
+      },
+      [megapixels],
+    );
+    // `image` is a linked input with no widget; it must not land on the
+    // megapixels slider just because that is the node's first visible field.
+    expect(errors[0]?.fieldKey).toBeUndefined();
+    expect(errors[0]?.message).toContain('image');
+    expect(errors[0]?.message).toContain('ImageScaleToTotalPixels');
+  });
+
+  it('falls back to the first visible field when ComfyUI omits the input name', () => {
+    const field36: Field = {
+      key: '36.megapixels',
+      nodeId: '36',
+      nodeClass: 'SomeNode',
+      input: 'megapixels',
+      widgetName: 'megapixels',
+      kind: 'slider',
+      label: '百万像素',
+      group: 'sampling',
+      order: 0,
+      required: true,
+      constraints: {},
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+    };
+    const errors = mapNodeErrors(
+      { node_errors: { '36': { errors: [{ message: 'bad value' }] } } },
+      [field36],
+    );
+    expect(errors[0]?.fieldKey).toBe('36.megapixels');
+  });
+
+  it('reads the offending input from extra_info when mapping node errors', () => {
+    const errors = mapNodeErrors(
+      {
+        node_errors: {
+          '5': {
+            class_type: 'KSampler',
+            errors: [
+              {
+                type: 'value_not_in_list',
+                message: 'Value not in list',
+                extra_info: { input_name: 'sampler_name', received_value: 'nope' },
+              },
+            ],
+          },
+        },
+      },
+      schema.fields,
+    );
+    expect(errors[0]?.fieldKey).toBe('5.sampler_name');
+  });
 });

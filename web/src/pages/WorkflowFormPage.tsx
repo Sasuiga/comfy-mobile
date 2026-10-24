@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { DEFAULT_GROUPS, DEFAULT_PROJECT, projectDisplayTitle } from '@comfy-mobile/shared';
-import type { Field, Preset, WorkflowDetail } from '@comfy-mobile/shared';
+import { DEFAULT_PROJECT, FIELD_TIERS, projectDisplayTitle } from '@comfy-mobile/shared';
+import type { Field, FieldTier, Preset, WorkflowDetail } from '@comfy-mobile/shared';
 import { api, ApiError, errorMessage } from '../api';
 import { useApp } from '../context';
 import { zh } from '../i18n';
@@ -29,9 +29,81 @@ interface RunStateValues {
   nodeError?: { nodeId?: string; message?: string };
 }
 
-function groupLabel(id: string): string {
-  const preset = DEFAULT_GROUPS.find((group) => group.id === id);
-  return preset?.label ?? id;
+function tierOf(field: Field): FieldTier {
+  return field.tier ?? 'advanced';
+}
+
+/**
+ * Start with the two sections users always need open. If a workflow only has
+ * tuning/advanced fields, open its first non-empty section so the form is not
+ * a wall of collapsed cards.
+ */
+function initialCollapsed(detail: WorkflowDetail): Set<string> {
+  const collapsed = new Set<string>(
+    FIELD_TIERS.filter((tier) => tier.collapsed).map((tier) => tier.id),
+  );
+  const present = new Set(detail.fields.filter((field) => field.visible).map(tierOf));
+  if (!FIELD_TIERS.some((tier) => present.has(tier.id) && !collapsed.has(tier.id))) {
+    const first = FIELD_TIERS.find((tier) => present.has(tier.id));
+    if (first) collapsed.delete(first.id);
+  }
+  return collapsed;
+}
+
+function hasContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim() !== '';
+  return true;
+}
+
+function displayValue(field: Field, value: unknown): string {
+  if (!hasContent(value)) return '';
+  if (field.kind === 'image') return '已选';
+  if (field.kind === 'text' || field.kind === 'textarea') {
+    const text = String(value).replace(/\s+/g, ' ').trim();
+    return text.length > 20 ? `${text.slice(0, 20)}…` : text;
+  }
+  if (field.kind === 'select') {
+    const option = (field.constraints.options ?? []).find(
+      (candidate) => candidate.value === String(value),
+    );
+    return option?.label ?? String(value);
+  }
+  if (typeof value === 'boolean') return value ? '开' : '关';
+  return String(value);
+}
+
+/** One-line preview shown in a collapsed section header. */
+function sectionSummary(
+  id: FieldTier,
+  fields: Field[],
+  values: Record<string, unknown>,
+): string {
+  if (id === 'input') {
+    const active = fields.filter((field) => values[field.key] !== null);
+    const filled = active.filter((field) => hasContent(values[field.key])).length;
+    const skipped = fields.length - active.length;
+    const missing = active.filter(
+      (field) => field.required && !hasContent(values[field.key]),
+    ).length;
+    const parts = [`${filled}/${active.length} 项已填`];
+    if (missing) parts.push(`${missing} 项待填`);
+    if (skipped) parts.push(`${skipped} 项已跳过`);
+    return parts.join(' · ');
+  }
+  if (id === 'output' || id === 'tuning') {
+    const parts = fields.slice(0, 4).map((field) => {
+      const value = displayValue(field, values[field.key]);
+      return value ? `${field.label} ${value}` : field.label;
+    });
+    if (fields.length > 4) parts.push(`等 ${fields.length} 项`);
+    return parts.join(' · ');
+  }
+  if (id === 'model') {
+    const cards = groupModelCards(fields).map((card) => card.label);
+    return `${cards.join(' · ')}（${fields.length} 个参数）`;
+  }
+  return `${fields.length} 个参数`;
 }
 
 function sameNodeId(a: string | undefined, b: string | undefined): boolean {
@@ -48,6 +120,69 @@ function nodeLabel(field: Field): string {
   return field.nodeTitle ?? field.nodeClass ?? `节点 ${field.nodeId}`;
 }
 
+const MODEL_KIND_LABELS: Record<string, string> = {
+  model: '主模型',
+  clip: 'CLIP',
+  vae: 'VAE',
+  lora: 'LoRA',
+};
+
+interface ModelCardGroup {
+  nodeId: string;
+  kind: string;
+  label: string;
+  subtitle?: string;
+  fields: Field[];
+  bypassable: boolean;
+}
+
+/**
+ * 模型加载 renders one card per loader node. Checkpoint, CLIP, VAE and every
+ * LoRA keep their own parameters, so switching a LoRA never touches the main
+ * model values and bypassing one LoRA leaves the others intact.
+ */
+function groupModelCards(fields: Field[]): ModelCardGroup[] {
+  const groups: ModelCardGroup[] = [];
+  const byNode = new Map<string, ModelCardGroup>();
+  for (const field of fields) {
+    let group = byNode.get(field.nodeId);
+    if (!group) {
+      group = {
+        nodeId: field.nodeId,
+        kind: field.group,
+        label: '',
+        fields: [],
+        bypassable: false,
+      };
+      byNode.set(field.nodeId, group);
+      groups.push(group);
+    }
+    group.fields.push(field);
+    if (field.nodeBypassable) group.bypassable = true;
+    // A node that mixes groups still belongs to the model stack; LoRA is the
+    // most specific label.
+    if (field.group === 'lora') group.kind = 'lora';
+  }
+
+  const totals = new Map<string, number>();
+  for (const group of groups) {
+    totals.set(group.kind, (totals.get(group.kind) ?? 0) + 1);
+  }
+  const seen = new Map<string, number>();
+  for (const group of groups) {
+    const total = totals.get(group.kind) ?? 1;
+    const index = (seen.get(group.kind) ?? 0) + 1;
+    seen.set(group.kind, index);
+    const base = MODEL_KIND_LABELS[group.kind] ?? '模型';
+    group.label = total > 1 ? `${base} ${index}` : base;
+    const first = group.fields[0];
+    const title = first?.nodeTitle?.trim();
+    group.subtitle =
+      title && title !== group.label ? title : first?.nodeClass;
+  }
+  return groups;
+}
+
 /**
  * Conversion warnings carry a node id and an input name. Map them back to the
  * visible fields so the form itself can show where the fix belongs instead of
@@ -56,10 +191,16 @@ function nodeLabel(field: Field): string {
 function buildFieldNotices(
   detail: WorkflowDetail,
   values: Record<string, unknown>,
+  shown: Field[],
 ): Map<string, FieldNotice> {
   const notices = new Map<string, FieldNotice>();
   const parsed = parseWorkflowWarnings(detail.warnings, detail.missingNodeTypes);
-  const visible = detail.fields.filter((field) => field.visible);
+  const visible = shown;
+  /** Combo warnings name the leaf input (`duration`), fields keep the dotted key. */
+  const matchesInput = (field: Field, input: string): boolean =>
+    field.input === input ||
+    field.widgetName === input ||
+    field.input.endsWith(`.${input}`);
   for (const item of parsed.items) {
     if (!item.nodeId) continue;
     const nodeFields = visible.filter((field) => sameNodeId(field.nodeId, item.nodeId));
@@ -68,17 +209,13 @@ function buildFieldNotices(
     let targets: Field[] = [];
     let notice: FieldNotice | undefined;
     if (item.kind === 'asset' && !item.placeholder) {
-      targets = nodeFields.filter(
-        (field) => item.field && (field.input === item.field || field.widgetName === item.field),
-      );
+      targets = nodeFields.filter((field) => item.field && matchesInput(field, item.field));
       notice = {
         level: 'warn',
         message: `资源缺失：${item.savedValue || '该文件'} 在当前 ComfyUI 上不存在，请重新选择`,
       };
     } else if (item.kind === 'param') {
-      targets = nodeFields.filter(
-        (field) => item.field && (field.input === item.field || field.widgetName === item.field),
-      );
+      targets = nodeFields.filter((field) => item.field && matchesInput(field, item.field));
       notice = {
         level: 'warn',
         message: `选项已失效：${item.savedValue || '原值'}，已自动替换为 ${
@@ -117,7 +254,9 @@ function buildFieldNotices(
 function defaultValues(detail: WorkflowDetail): Record<string, unknown> {
   const values: Record<string, unknown> = {};
   for (const field of detail.fields) {
-    if (!field.visible) continue;
+    // Include collapsed "更多参数" fields too: revealing one must show the
+    // saved workflow value, not an empty control.
+    if (!field.visible && !field.more) continue;
     if (field.default === undefined || field.default === null) continue;
     values[field.key] = field.default;
   }
@@ -143,6 +282,8 @@ export function WorkflowFormPage() {
   const [randomizeSeeds, setRandomizeSeeds] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  /** Re-reading ComfyUI's model list after a download, without losing input. */
+  const [rechecking, setRechecking] = useState(false);
   const [presetModal, setPresetModal] = useState(false);
   const [presetName, setPresetName] = useState('');
   const [savingPreset, setSavingPreset] = useState(false);
@@ -150,6 +291,8 @@ export function WorkflowFormPage() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   /** Nodes the user bypassed for debugging; their fields are left out. */
   const [bypassed, setBypassed] = useState<Set<string>>(new Set());
+  /** Reveal fields the backend parked behind "更多参数". */
+  const [showMore, setShowMore] = useState(false);
 
   const stateValues = (location.state as RunStateValues | null)?.values;
   const stateBypassed = (location.state as RunStateValues | null)?.bypassedNodes;
@@ -171,9 +314,7 @@ export function WorkflowFormPage() {
     try {
       const next = await api.getWorkflow(key);
       setDetail(next);
-      setCollapsed(
-        new Set(next.groups.filter((group) => group.collapsed).map((group) => group.id)),
-      );
+      setCollapsed(initialCollapsed(next));
       const defaults = defaultValues(next);
       if (stateValues) {
         for (const [name, value] of Object.entries(stateValues)) {
@@ -189,10 +330,12 @@ export function WorkflowFormPage() {
       }
       if (stateNodeError?.nodeId) {
         const nodeFields = next.fields.filter(
-          (field) => field.visible && sameNodeId(field.nodeId, stateNodeError.nodeId),
+          (field) =>
+            (field.visible || field.more) && sameNodeId(field.nodeId, stateNodeError.nodeId),
         );
         const first = nodeFields[0];
         if (first) {
+          if (first.more) setShowMore(true);
           setErrors({
             [first.key]: stateNodeError.message
               ? `节点执行失败：${stateNodeError.message}`
@@ -200,7 +343,7 @@ export function WorkflowFormPage() {
           });
           setCollapsed((current) => {
             const expanded = new Set(current);
-            expanded.delete(first.group);
+            expanded.delete(tierOf(first));
             return expanded;
           });
           focusField(first.key);
@@ -223,33 +366,82 @@ export function WorkflowFormPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
+  /**
+   * The server keeps ComfyUI's object_info in memory, so a model installed
+   * after the app started stays "missing" until a refresh. Do that refresh and
+   * rebuild the schema, but keep everything the user already typed.
+   */
+  const recheckModels = useCallback(async (): Promise<void> => {
+    setRechecking(true);
+    try {
+      await api.refreshCaches();
+      const next = await api.getWorkflow(key);
+      setDetail(next);
+      const defaults = defaultValues(next);
+      setValues((current) => {
+        const merged = { ...defaults };
+        for (const [name, value] of Object.entries(current)) {
+          if (next.fields.some((field) => field.key === name)) merged[name] = value;
+        }
+        return merged;
+      });
+      const missing = parseWorkflowWarnings(next.warnings, next.missingNodeTypes).items.filter(
+        (item) => item.kind === 'asset' && !item.placeholder,
+      ).length;
+      showToast(
+        missing ? `已重新读取模型列表，仍有 ${missing} 个文件缺失` : '模型列表已更新，缺失文件已解决',
+        missing ? 'info' : 'success',
+      );
+    } catch (cause) {
+      showToast(errorMessage(cause), 'error');
+    } finally {
+      setRechecking(false);
+    }
+  }, [key, showToast]);
+
   const title = detail?.name ?? '工作流';
   usePageTitle(title);
 
-  const visibleGroups = useMemo(() => {
-    if (!detail) return [];
-    return detail.groups
-      .map((group) => ({
-        ...group,
-        label: group.label || groupLabel(group.id),
-        fields: detail.fields.filter((field) => field.visible && field.group === group.id),
-      }))
-      .filter((group) => group.fields.length > 0);
-  }, [detail]);
+  /** Fields rendered now: always-needed ones, plus the collapsed extras. */
+  const shownFields = useMemo(
+    () => detail?.fields.filter((field) => field.visible || (showMore && field.more)) ?? [],
+    [detail, showMore],
+  );
 
-  const visibleFields = useMemo(
-    () => detail?.fields.filter((field) => field.visible) ?? [],
+  const visibleSections = useMemo(
+    () =>
+      FIELD_TIERS.map((tier) => ({
+        ...tier,
+        fields: shownFields.filter((field) => tierOf(field) === tier.id),
+      })).filter((section) => section.fields.length > 0),
+    [shownFields],
+  );
+
+  const visibleFields = shownFields;
+
+  /** 模型加载: one independent card per loader node. */
+  const modelCards = useMemo(
+    () => groupModelCards(shownFields.filter((field) => tierOf(field) === 'model')),
+    [shownFields],
+  );
+
+  /** Number of fields that would appear after expanding 更多参数. */
+  const moreCount = useMemo(
+    () => detail?.fields.filter((field) => field.more).length ?? 0,
     [detail],
   );
 
   /** Conversion warnings mapped to the fields the user can actually fix. */
   const fieldNotices = useMemo(
-    () => (detail ? buildFieldNotices(detail, values) : new Map<string, FieldNotice>()),
-    [detail, values],
+    () =>
+      detail
+        ? buildFieldNotices(detail, values, shownFields)
+        : new Map<string, FieldNotice>(),
+    [detail, values, shownFields],
   );
 
-  const groupIssues = useMemo(() => {
-    const map = new Map<string, { count: number; level: 'warn' | 'danger' }>();
+  const sectionIssues = useMemo(() => {
+    const map = new Map<FieldTier, { count: number; level: 'warn' | 'danger' }>();
     for (const field of visibleFields) {
       // Bypassed nodes are not part of the prompt, so their warnings and
       // validation errors are irrelevant for this run.
@@ -258,10 +450,11 @@ export function WorkflowFormPage() {
         ? { level: 'danger' as const }
         : fieldNotices.get(field.key);
       if (!issue) continue;
-      const entry = map.get(field.group) ?? { count: 0, level: 'warn' as 'warn' | 'danger' };
+      const tier = tierOf(field);
+      const entry = map.get(tier) ?? { count: 0, level: 'warn' as 'warn' | 'danger' };
       entry.count += 1;
       if (issue.level === 'danger') entry.level = 'danger';
-      map.set(field.group, entry);
+      map.set(tier, entry);
     }
     return map;
   }, [visibleFields, errors, fieldNotices, bypassed]);
@@ -309,11 +502,16 @@ export function WorkflowFormPage() {
   /** Expand every section that currently holds a problem and jump to the first. */
   const revealIssues = (keys: string[]): void => {
     if (!keys.length || !detail) return;
+    if (
+      detail.fields.some((field) => field.more && keys.includes(field.key))
+    ) {
+      setShowMore(true);
+    }
     setCollapsed((current) => {
       const next = new Set(current);
       for (const fieldKey of keys) {
         const field = detail.fields.find((item) => item.key === fieldKey);
-        if (field) next.delete(field.group);
+        if (field) next.delete(tierOf(field));
       }
       return next;
     });
@@ -518,9 +716,11 @@ export function WorkflowFormPage() {
       <WorkflowWarnings
         warnings={detail.warnings}
         missingNodeTypes={detail.missingNodeTypes}
+        onRecheck={() => void recheckModels()}
+        rechecking={rechecking}
       />
 
-      {visibleFields.length === 0 ? (
+      {!detail.fields.some((field) => field.visible || field.more) ? (
         <EmptyState
           icon="settings"
           title="没有可编辑的参数"
@@ -572,18 +772,30 @@ export function WorkflowFormPage() {
           </div>
 
           <div className="form-groups">
-            {visibleGroups.map((group) => {
-              const isCollapsed = collapsed.has(group.id);
-              const imageFields = group.fields.filter((field) => field.kind === 'image');
+            {visibleSections.map((section, sectionIndex) => {
+              const isCollapsed = collapsed.has(section.id);
+              const previous = visibleSections[sectionIndex - 1];
+              // 更多参数 is one umbrella over 可调参数 and 高级设置.
+              const startsMore =
+                (section.id === 'tuning' || section.id === 'advanced') &&
+                previous?.id !== 'tuning' &&
+                previous?.id !== 'advanced';
+              const imageFields = section.fields.filter((field) => field.kind === 'image');
               const activeImageFields = imageFields.filter(
                 (field) =>
                   !bypassed.has(field.nodeId) && !isSkippedField(field, values[field.key]),
               );
-              const issue = groupIssues.get(group.id);
+              const issue = sectionIssues.get(section.id);
               return (
-                <SectionCard
-                  key={group.id}
-                  title={group.label}
+                <Fragment key={section.id}>
+                  {startsMore ? (
+                    <div className="tier-group-heading">
+                      <h2>更多参数</h2>
+                      <p>可调参数与高级设置；保持默认也能运行</p>
+                    </div>
+                  ) : null}
+                  <SectionCard
+                    title={section.label}
                   tone={issue?.level}
                   badge={
                     issue ? (
@@ -602,8 +814,8 @@ export function WorkflowFormPage() {
                       onClick={() =>
                         setCollapsed((current) => {
                           const next = new Set(current);
-                          if (next.has(group.id)) next.delete(group.id);
-                          else next.add(group.id);
+                          if (next.has(section.id)) next.delete(section.id);
+                          else next.add(section.id);
                           return next;
                         })
                       }
@@ -614,9 +826,77 @@ export function WorkflowFormPage() {
                 >
                   {isCollapsed ? (
                     <p className="collapsed-hint">
-                      {group.fields.length} 个参数已收起
-                      {issue ? ` · ${issue.count} 项待处理` : ''}
+                      {sectionSummary(section.id, section.fields, values)}
                     </p>
+                  ) : section.id === 'model' ? (
+                    <div className="model-cards">
+                      {modelCards.map((card) => {
+                        const nodeBypassed = bypassed.has(card.nodeId);
+                        return (
+                          <div
+                            key={card.nodeId}
+                            className={`model-card${nodeBypassed ? ' is-bypassed' : ''}`}
+                          >
+                            <div className="model-card-head">
+                              <div className="model-card-title">
+                                <span>{card.label}</span>
+                                {card.subtitle && card.subtitle !== card.label ? (
+                                  <small>{card.subtitle}</small>
+                                ) : null}
+                              </div>
+                              {card.bypassable ? (
+                                <button
+                                  type="button"
+                                  className={`text-button node-bypass-toggle${
+                                    nodeBypassed ? ' restore' : ''
+                                  }`}
+                                  title={
+                                    nodeBypassed
+                                      ? '恢复节点，使其重新参与运行'
+                                      : '绕过这个模型节点（与 ComfyUI 的 Ctrl+B 相同），便于保持工作流不变做对比测试'
+                                  }
+                                  onClick={() => toggleNodeBypass(card.nodeId)}
+                                >
+                                  {nodeBypassed ? '恢复节点' : '绕过'}
+                                </button>
+                              ) : null}
+                            </div>
+                            {nodeBypassed ? (
+                              <p className="node-bypass-hint">
+                                该模型已绕过，本次运行不会执行它。
+                              </p>
+                            ) : (
+                              <div className="field-list">
+                                {card.fields.map((field) => (
+                                  <FieldRow
+                                    key={field.key}
+                                    field={field}
+                                    hideNodeTitle
+                                    error={errors[field.key]}
+                                    warning={fieldNotices.get(field.key)}
+                                    skipped={isSkippedField(field, values[field.key])}
+                                    onToggleSkip={
+                                      field.skippable
+                                        ? () => toggleSlot(field)
+                                        : undefined
+                                    }
+                                  >
+                                    <FieldControl
+                                      field={field}
+                                      value={values[field.key]}
+                                      error={errors[field.key]}
+                                      disabled={submitting}
+                                      project={project}
+                                      onChange={(value) => setValue(field, value)}
+                                    />
+                                  </FieldRow>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   ) : (
                     <>
                       {imageFields.length > 1 && activeImageFields.length ? (
@@ -629,11 +909,18 @@ export function WorkflowFormPage() {
                         />
                       ) : null}
                       <div className="field-list">
-                        {group.fields.map((field, index) => {
-                          const previous = group.fields[index - 1];
+                        {section.fields.map((field, index) => {
+                          const previous = section.fields[index - 1];
                           const startsNode = !previous || previous.nodeId !== field.nodeId;
                           const nodeBypassed = bypassed.has(field.nodeId);
-                          const showNodeToggle = startsNode && Boolean(field.nodeBypassable);
+                          // Node bypass is a debugging tool; keep it out of the
+                          // sections people fill every run unless it is active.
+                          const showNodeToggle =
+                            startsNode &&
+                            Boolean(field.nodeBypassable) &&
+                            (nodeBypassed ||
+                              section.id === 'tuning' ||
+                              section.id === 'advanced');
                           const nodeRow = showNodeToggle ? (
                             <div
                               className={`node-bypass${nodeBypassed ? ' is-bypassed' : ''}`}
@@ -702,10 +989,23 @@ export function WorkflowFormPage() {
                       </div>
                     </>
                   )}
-                </SectionCard>
+                  </SectionCard>
+                </Fragment>
               );
             })}
           </div>
+
+          {moreCount ? (
+            <button
+              type="button"
+              className={`more-toggle${showMore ? ' expanded' : ''}`}
+              aria-expanded={showMore}
+              onClick={() => setShowMore((current) => !current)}
+            >
+              <Icon name="chevron" size={16} />
+              {showMore ? '收起更多参数' : `显示更多参数（${moreCount}）`}
+            </button>
+          ) : null}
 
           {submitError ? (
             <div className="submit-error" role="alert">

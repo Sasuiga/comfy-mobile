@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { WorkflowDetail, WorkflowSummary, WorkflowTemplate } from '@comfy-mobile/shared';
+import type {
+  RunSummary,
+  WorkflowDetail,
+  WorkflowSummary,
+  WorkflowTemplate,
+} from '@comfy-mobile/shared';
 import { buildApp } from '../src/app.js';
 import { createMockComfyServer, type MockComfyServer } from '../src/mock/server.js';
 import { MOCK_THUMBNAIL_PNG, mockApiWorkflow } from '../src/mock/fixtures.js';
@@ -165,6 +170,131 @@ describe('API integration with mock ComfyUI', () => {
     expect(sseText).toContain('event: done');
 
     expect(mock.state.requests.some((request) => request.url.startsWith('/api/prompt'))).toBe(true);
+  });
+
+  it('clears run history, scoped to one project when asked', async () => {
+    const mock = await startMock();
+    const { app } = await startApp(mock.url);
+    const items = (
+      await app.inject({ method: 'GET', url: '/api/workflows?refresh=1' })
+    ).json().items as WorkflowSummary[];
+    const key = items.find((item) => item.name === 'txt2img-ui')!.key;
+
+    const submit = async (project: string): Promise<string> => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/runs',
+        payload: { workflowKey: key, project, values: { '5.seed': 3 } },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      const runId = (response.json() as { runId: string }).runId;
+      await waitFor(async () => {
+        const run = await app.inject({ method: 'GET', url: `/api/runs/${runId}` });
+        return (run.json() as { state: string }).state === 'completed' ? true : undefined;
+      });
+      return runId;
+    };
+
+    const keptRun = await submit('proj-a');
+    const droppedRun = await submit('proj-b');
+
+    const scoped = await app.inject({
+      method: 'DELETE',
+      url: `/api/runs?project=${encodeURIComponent('proj-b')}`,
+    });
+    expect(scoped.statusCode, scoped.body).toBe(200);
+    expect(scoped.json()).toMatchObject({ ok: true, removed: 1, kept: 0 });
+    const afterScoped = (
+      await app.inject({ method: 'GET', url: '/api/runs' })
+    ).json().items as RunSummary[];
+    expect(afterScoped.map((item) => item.id)).toEqual([keptRun]);
+    expect((await app.inject({ method: 'GET', url: `/api/runs/${droppedRun}` })).statusCode).toBe(404);
+
+    const all = await app.inject({ method: 'DELETE', url: '/api/runs' });
+    expect(all.statusCode, all.body).toBe(200);
+    expect(all.json()).toMatchObject({ removed: 1, kept: 0 });
+    expect((await app.inject({ method: 'GET', url: '/api/runs' })).json().items).toEqual([]);
+    expect((await app.inject({ method: 'GET', url: `/api/runs/${keptRun}` })).statusCode).toBe(404);
+  }, 15_000);
+
+  it('deletes one finished run', async () => {
+    const mock = await startMock();
+    const { app } = await startApp(mock.url);
+    const items = (
+      await app.inject({ method: 'GET', url: '/api/workflows?refresh=1' })
+    ).json().items as WorkflowSummary[];
+    const key = items.find((item) => item.name === 'txt2img-ui')!.key;
+
+    const submitted = await app.inject({
+      method: 'POST',
+      url: '/api/runs',
+      payload: { workflowKey: key, values: { '5.seed': 9 } },
+    });
+    expect(submitted.statusCode, submitted.body).toBe(200);
+    const runId = (submitted.json() as { runId: string }).runId;
+    await waitFor(async () => {
+      const run = await app.inject({ method: 'GET', url: `/api/runs/${runId}` });
+      return (run.json() as { state: string }).state === 'completed' ? true : undefined;
+    });
+
+    const removed = await app.inject({ method: 'DELETE', url: `/api/runs/${runId}` });
+    expect(removed.statusCode, removed.body).toBe(200);
+    expect(removed.json()).toEqual({ ok: true });
+    expect((await app.inject({ method: 'GET', url: '/api/runs' })).json().items).toEqual([]);
+    expect((await app.inject({ method: 'GET', url: `/api/runs/${runId}` })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'DELETE', url: `/api/runs/${runId}` })).statusCode).toBe(404);
+  }, 15_000);
+
+  it('keeps queued runs when history is cleared', async () => {
+    const mock = await startMock({ autoRun: false });
+    const { app } = await startApp(mock.url);
+    const items = (
+      await app.inject({ method: 'GET', url: '/api/workflows?refresh=1' })
+    ).json().items as WorkflowSummary[];
+    const key = items.find((item) => item.name === 'txt2img-ui')!.key;
+
+    const submitted = await app.inject({
+      method: 'POST',
+      url: '/api/runs',
+      payload: { workflowKey: key, values: { '5.seed': 5 } },
+    });
+    expect(submitted.statusCode, submitted.body).toBe(200);
+
+    const activeId = (submitted.json() as { runId: string }).runId;
+    const rejected = await app.inject({ method: 'DELETE', url: `/api/runs/${activeId}` });
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json().error.message).toContain('进行中的任务不能删除');
+
+    const cleared = await app.inject({ method: 'DELETE', url: '/api/runs' });
+    expect(cleared.statusCode, cleared.body).toBe(200);
+    expect(cleared.json()).toMatchObject({ removed: 0, kept: 1 });
+    expect((await app.inject({ method: 'GET', url: '/api/runs' })).json().items).toHaveLength(1);
+  });
+
+  it('treats a fresh ComfyUI without a workflows directory as an empty list', async () => {
+    const mock = await startMock({ emptyUserData: true });
+    const { app } = await startApp(mock.url);
+
+    const listResponse = await app.inject({ method: 'GET', url: '/api/workflows?refresh=1' });
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json().items).toEqual([]);
+
+    const testResponse = await app.inject({
+      method: 'POST',
+      url: '/api/config/test',
+      payload: {},
+    });
+    expect(testResponse.statusCode).toBe(200);
+    const result = testResponse.json() as {
+      ok: boolean;
+      workflowCount?: number;
+      warning?: string;
+      capabilities: { userdata: boolean };
+    };
+    expect(result.ok).toBe(true);
+    expect(result.capabilities.userdata).toBe(true);
+    expect(result.workflowCount).toBe(0);
+    expect(result.warning).toContain('还没有保存任何工作流');
   });
 
   it('validates form overrides, presets, imports and uploads', async () => {

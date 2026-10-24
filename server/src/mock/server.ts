@@ -19,6 +19,8 @@ export interface MockComfyOptions {
   workflows?: Record<string, unknown>;
   objectInfo?: Record<string, unknown>;
   templates?: Record<string, unknown>;
+  /** Simulate a fresh ComfyUI with no user/default/workflows directory. */
+  emptyUserData?: boolean;
 }
 
 interface MockJob {
@@ -166,6 +168,7 @@ export async function createMockComfyServer(
     token: options.token,
   };
   const autoRun = options.autoRun ?? true;
+  const emptyUserData = options.emptyUserData ?? false;
   const stepDelayMs = options.stepDelayMs ?? 8;
   const allTimers = new Set<NodeJS.Timeout>();
 
@@ -377,6 +380,11 @@ export async function createMockComfyServer(
     }
 
     if (method === 'GET' && path === '/userdata') {
+      if (emptyUserData) {
+        response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+        response.end('Directory not found');
+        return;
+      }
       const items = Object.keys(workflows).map((workflowPath) => {
         const content = JSON.stringify(workflows[workflowPath]);
         return {
@@ -407,7 +415,14 @@ export async function createMockComfyServer(
     }
 
     if (method === 'GET' && path.startsWith('/userdata/')) {
-      const workflowPath = decodeURIComponent(path.slice('/userdata/'.length));
+      const encoded = path.slice('/userdata/'.length);
+      // Like ComfyUI's aiohttp route `/userdata/{file}`, only the whole encoded
+      // path matches; a literal slash there falls through to a 404.
+      if (!encoded || encoded.includes('/')) {
+        sendJson(response, 404, { error: { message: 'workflow not found' } });
+        return;
+      }
+      const workflowPath = decodeURIComponent(encoded);
       const workflow = workflows[workflowPath];
       if (workflow === undefined) {
         sendJson(response, 404, { error: { message: 'workflow not found' } });

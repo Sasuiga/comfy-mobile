@@ -163,6 +163,8 @@ export class RunManager {
   private readonly persistTimers = new Map<string, NodeJS.Timeout>();
   private readonly missingSince = new Map<string, number>();
   private readonly finalizing = new Set<string>();
+  /** Ids whose record was deleted; a late write must not bring them back. */
+  private readonly removedIds = new Set<string>();
   private readonly events = new EventEmitter();
   private pollTimer?: NodeJS.Timeout;
   private started = false;
@@ -302,6 +304,81 @@ export class RunManager {
       ...item,
       project: item.project ?? DEFAULT_PROJECT,
     }));
+  }
+
+  /**
+   * Forgets run history, optionally limited to one project. Active runs stay:
+   * the poller and the websocket still need their records to finish. Archived
+   * output files are assets, not history, so they are left untouched.
+   */
+  async clear(project?: string): Promise<{ removed: number; kept: number }> {
+    const wanted = project?.trim();
+    const keepIds = new Set<string>();
+    const removeIds = new Set<string>();
+    for (const summary of this.summaries) {
+      if (wanted && (summary.project ?? DEFAULT_PROJECT) !== wanted) continue;
+      if (summary.state === 'queued' || summary.state === 'running') keepIds.add(summary.id);
+      else removeIds.add(summary.id);
+    }
+    if (!removeIds.size) return { removed: 0, kept: keepIds.size };
+
+    for (let index = this.summaries.length - 1; index >= 0; index -= 1) {
+      if (removeIds.has(this.summaries[index]!.id)) this.summaries.splice(index, 1);
+    }
+    for (const [promptId, id] of this.byPrompt) {
+      if (removeIds.has(id)) this.byPrompt.delete(promptId);
+    }
+    for (const id of removeIds) {
+      this.removedIds.add(id);
+      this.runs.delete(id);
+      this.missingSince.delete(id);
+      const timer = this.persistTimers.get(id);
+      if (timer) clearTimeout(timer);
+      this.persistTimers.delete(id);
+      await this.store.remove(`runs/${id}.json`).catch(() => undefined);
+    }
+    if (!wanted) {
+      // Files trimmed out of the index by an older build are invisible in the
+      // list but still loadable by link; clearing everything removes them too.
+      for (const file of await this.store.list('runs')) {
+        const id = file.replace(/\.json$/i, '');
+        if (!/^[a-f0-9-]{20,}$/i.test(id) || removeIds.has(id) || keepIds.has(id)) continue;
+        await this.store.remove(`runs/${file}`).catch(() => undefined);
+      }
+    }
+    await this.persistIndex();
+    return { removed: removeIds.size, kept: keepIds.size };
+  }
+
+  /** Forgets one run. Active jobs must be canceled (or finish) first. */
+  async remove(id: string): Promise<void> {
+    if (!/^[a-f0-9-]{20,}$/i.test(id)) {
+      throw new AppError(404, 'RUN_NOT_FOUND', '运行记录不存在');
+    }
+    const inMemory = this.runs.get(id);
+    const summary = this.summaries.find((item) => item.id === id);
+    const state = inMemory?.state ?? summary?.state;
+    if (state === 'queued' || state === 'running') {
+      throw new AppError(409, 'RUN_ACTIVE', '进行中的任务不能删除，请先取消或等待完成');
+    }
+    this.removedIds.add(id);
+    if (!inMemory && !summary) {
+      // A direct link can point at a run that already left the index.
+      const stored = await this.store.readOrNull<RunRecord>(`runs/${id}.json`);
+      if (!stored) throw new AppError(404, 'RUN_NOT_FOUND', '运行记录不存在');
+    }
+    const index = this.summaries.findIndex((item) => item.id === id);
+    if (index >= 0) this.summaries.splice(index, 1);
+    for (const [promptId, runId] of this.byPrompt) {
+      if (runId === id) this.byPrompt.delete(promptId);
+    }
+    this.runs.delete(id);
+    this.missingSince.delete(id);
+    const timer = this.persistTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.persistTimers.delete(id);
+    await this.store.remove(`runs/${id}.json`).catch(() => undefined);
+    await this.persistIndex();
   }
 
   async cancel(id: string): Promise<RunRecord> {
@@ -575,6 +652,7 @@ export class RunManager {
   }
 
   private async persistRun(run: RunRecord): Promise<void> {
+    if (this.removedIds.has(run.id)) return;
     await this.store.write(`runs/${run.id}.json`, run).catch(() => undefined);
   }
 

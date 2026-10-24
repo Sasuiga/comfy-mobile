@@ -8,6 +8,8 @@ import {
 } from '@comfy-mobile/shared';
 import { api, errorMessage } from '../api';
 import { Icon } from '../components/Icon';
+import { SwipeRow } from '../components/SwipeRow';
+import { useApp } from '../context';
 import {
   EmptyState,
   ErrorBox,
@@ -45,7 +47,11 @@ export function HistoryPage() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { showToast } = useApp();
 
   const loadProjects = useCallback(async (): Promise<void> => {
     try {
@@ -83,6 +89,7 @@ export function HistoryPage() {
   }, [loadProjects]);
 
   const setFilter = (path: string): void => {
+    setOpenId(null);
     const next = new URLSearchParams(params);
     if (path) next.set('project', path);
     else next.delete('project');
@@ -92,6 +99,59 @@ export function HistoryPage() {
   const refresh = (): void => {
     void loadProjects();
     void load();
+  };
+
+  const clear = async (): Promise<void> => {
+    const scope = filter ? `「${projectDisplayTitle(filter)}」的` : '全部';
+    const confirmed = window.confirm(
+      `清空${scope}运行历史？\n只删除历史记录，已保存的结果文件会保留；进行中的任务不会被删除。`,
+    );
+    if (!confirmed) return;
+    setClearing(true);
+    try {
+      const result = await api.clearRuns(filter || undefined);
+      if (result.removed) {
+        showToast(
+          result.kept
+            ? `已清理 ${result.removed} 条历史记录，${result.kept} 次进行中的任务已保留`
+            : `已清理 ${result.removed} 条历史记录`,
+          'success',
+        );
+      } else {
+        showToast('没有可清理的历史记录，进行中的任务会保留', 'info');
+      }
+      setItems([]);
+      await load(false);
+    } catch (cause) {
+      showToast(errorMessage(cause), 'error');
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const remove = async (item: RunSummary): Promise<void> => {
+    setOpenId(null);
+    if (ACTIVE.has(item.state)) {
+      showToast('进行中的任务不能删除，请先取消或等待完成', 'info');
+      return;
+    }
+    if (
+      !window.confirm(
+        `删除「${item.workflowName}」的这条历史记录？\n已保存的结果文件会保留。`,
+      )
+    ) {
+      return;
+    }
+    setRemovingId(item.id);
+    try {
+      await api.deleteRun(item.id);
+      setItems((current) => current.filter((entry) => entry.id !== item.id));
+      showToast('已删除这条历史记录', 'success');
+    } catch (cause) {
+      showToast(errorMessage(cause), 'error');
+    } finally {
+      setRemovingId(null);
+    }
   };
 
   const hasActive = useMemo(() => items.some((item) => ACTIVE.has(item.state)), [items]);
@@ -115,15 +175,29 @@ export function HistoryPage() {
             : undefined
         }
         actions={
-          <button
-            type="button"
-            className="icon-button"
-            aria-label={zh.common.refresh}
-            disabled={refreshing}
-            onClick={refresh}
-          >
-            {refreshing ? <Spinner size={20} /> : <Icon name="refresh" />}
-          </button>
+          <>
+            {items.length ? (
+              <button
+                type="button"
+                className="icon-button danger"
+                aria-label={zh.history.clear}
+                title={zh.history.clear}
+                disabled={clearing || refreshing}
+                onClick={() => void clear()}
+              >
+                {clearing ? <Spinner size={20} /> : <Icon name="trash" />}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="icon-button"
+              aria-label={zh.common.refresh}
+              disabled={refreshing || clearing}
+              onClick={refresh}
+            >
+              {refreshing ? <Spinner size={20} /> : <Icon name="refresh" />}
+            </button>
+          </>
         }
       />
 
@@ -172,44 +246,70 @@ export function HistoryPage() {
         />
       ) : (
         <div className="run-list">
-          {items.map((item) => (
-            <button
-              type="button"
-              key={item.id}
-              className="run-card"
-              onClick={() => navigate(`/runs/${item.id}`)}
-            >
-              <span className="run-thumb">
-                {item.thumbnail ? (
-                  <img src={item.thumbnail} alt="" loading="lazy" />
-                ) : (
-                  <Icon name={item.state === 'failed' ? 'alert' : 'image'} size={24} />
-                )}
-              </span>
-              <span className="run-card-main">
-                <span className="run-card-top">
-                  <strong>{item.workflowName}</strong>
-                  <StatusBadge state={item.state} />
-                </span>
-                <span className="run-card-meta">
-                  {item.project ? (
-                    <span className="run-project">
-                      {projectDisplayTitle(item.project ?? DEFAULT_PROJECT)}
+          {items.map((item) => {
+            const open = openId === item.id;
+            return (
+              <SwipeRow
+                key={item.id}
+                open={open}
+                onOpenChange={(next) => setOpenId(next ? item.id : null)}
+                action={
+                  <button
+                    type="button"
+                    className="swipe-delete"
+                    aria-label={`删除「${item.workflowName}」的历史记录`}
+                    aria-hidden={!open}
+                    tabIndex={open ? 0 : -1}
+                    disabled={removingId === item.id}
+                    onClick={() => void remove(item)}
+                  >
+                    {removingId === item.id ? (
+                      <Spinner size={18} />
+                    ) : (
+                      <Icon name="trash" size={20} />
+                    )}
+                    <span>{zh.common.delete}</span>
+                  </button>
+                }
+              >
+                <button
+                  type="button"
+                  className="run-card"
+                  onClick={() => navigate(`/runs/${item.id}`)}
+                >
+                  <span className="run-thumb">
+                    {item.thumbnail ? (
+                      <img src={item.thumbnail} alt="" loading="lazy" />
+                    ) : (
+                      <Icon name={item.state === 'failed' ? 'alert' : 'image'} size={24} />
+                    )}
+                  </span>
+                  <span className="run-card-main">
+                    <span className="run-card-top">
+                      <strong>{item.workflowName}</strong>
+                      <StatusBadge state={item.state} />
                     </span>
-                  ) : null}
-                  <span>{formatWhen(item.createdAt)}</span>
-                  {item.outputCount > 0 ? (
-                    <span>{item.outputCount} {zh.history.resultCount}</span>
-                  ) : null}
-                  {ACTIVE.has(item.state) ? <span className="live-dot">进行中</span> : null}
-                </span>
-                {item.errorMessage ? (
-                  <span className="run-error">{item.errorMessage}</span>
-                ) : null}
-              </span>
-              <Icon name="chevron" size={18} className="chevron" />
-            </button>
-          ))}
+                    <span className="run-card-meta">
+                      {item.project ? (
+                        <span className="run-project">
+                          {projectDisplayTitle(item.project ?? DEFAULT_PROJECT)}
+                        </span>
+                      ) : null}
+                      <span>{formatWhen(item.createdAt)}</span>
+                      {item.outputCount > 0 ? (
+                        <span>{item.outputCount} {zh.history.resultCount}</span>
+                      ) : null}
+                      {ACTIVE.has(item.state) ? <span className="live-dot">进行中</span> : null}
+                    </span>
+                    {item.errorMessage ? (
+                      <span className="run-error">{item.errorMessage}</span>
+                    ) : null}
+                  </span>
+                  <Icon name="chevron" size={18} className="chevron" />
+                </button>
+              </SwipeRow>
+            );
+          })}
         </div>
       )}
     </div>

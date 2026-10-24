@@ -1,11 +1,15 @@
 import { useMemo, useState } from 'react';
 import type { WorkflowDetail } from '@comfy-mobile/shared';
 import { Icon } from './Icon';
+import { Spinner } from './UI';
 import { parseWorkflowWarnings, type ParsedWarning } from '../warnings';
 
 interface WorkflowWarningsProps {
   warnings: string[];
   missingNodeTypes: WorkflowDetail['missingNodeTypes'];
+  /** Re-read ComfyUI's model/node lists after the user installs a model. */
+  onRecheck?: () => void;
+  rechecking?: boolean;
 }
 
 interface NodeGroup {
@@ -78,7 +82,21 @@ function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-export function WorkflowWarnings({ warnings, missingNodeTypes }: WorkflowWarningsProps) {
+/** Only model/file selectors benefit from re-reading ComfyUI's lists. */
+const MODEL_ASSET_INPUT =
+  /^(?:ckpt_name|unet_name|lora_name|vae_name|clip_name\d*|model_name|control_net_name|style_model_name|embedding|ipadapter)$/i;
+const MODEL_FILE = /\.(?:safetensors|sft|ckpt|pt|pt2|pth|bin|gguf|onnx)$/i;
+
+function isModelAsset(item: ParsedWarning): boolean {
+  return MODEL_ASSET_INPUT.test(item.field ?? '') || MODEL_FILE.test(item.savedValue ?? '');
+}
+
+export function WorkflowWarnings({
+  warnings,
+  missingNodeTypes,
+  onRecheck,
+  rechecking = false,
+}: WorkflowWarningsProps) {
   const [open, setOpen] = useState(false);
   const [showAllAssets, setShowAllAssets] = useState(false);
   const [showAllOther, setShowAllOther] = useState(false);
@@ -98,6 +116,7 @@ export function WorkflowWarnings({ warnings, missingNodeTypes }: WorkflowWarning
     (item) => item.kind === 'asset' && item.placeholder,
   ).length;
   const assetGroups = groupAssets(realAssetItems);
+  const modelAssetCount = realAssetItems.filter(isModelAsset).length;
   const visibleAssetGroups = showAllAssets ? assetGroups : assetGroups.slice(0, 4);
   const otherItems = parsed.items.filter((item) => item.kind === 'other');
   const visibleOther = showAllOther ? otherItems : otherItems.slice(0, 3);
@@ -121,6 +140,29 @@ export function WorkflowWarnings({ warnings, missingNodeTypes }: WorkflowWarning
         <span className="warn-headline">{parsed.headline}</span>
         <Icon name="chevron" size={16} className={open ? 'rotated' : ''} />
       </button>
+
+      {modelAssetCount && onRecheck ? (
+        <div className="warn-recheck-row">
+          <button
+            type="button"
+            className="warn-recheck"
+            disabled={rechecking}
+            onClick={onRecheck}
+          >
+            {rechecking ? (
+              <Spinner size={14} label="正在重新读取…" />
+            ) : (
+              <>
+                <Icon name="refresh" size={15} />
+                <span>重新检查模型</span>
+              </>
+            )}
+          </button>
+          <span className="warn-recheck-hint">
+            刚下载完模型？点这里重新读取 ComfyUI 的模型列表
+          </span>
+        </div>
+      ) : null}
 
       {open ? (
         <div className="warn-body">
