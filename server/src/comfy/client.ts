@@ -457,6 +457,28 @@ export class ComfyClient {
     return raw;
   }
 
+  /**
+   * Removes the workflow file from ComfyUI's userdata, i.e. the saved workflow
+   * itself rather than a local copy. ComfyUI answers 204 on success and 404 when
+   * the file is already gone.
+   */
+  async deleteWorkflowFile(path: string, timeoutMs = 20_000): Promise<void> {
+    const response = await this.request(
+      `/userdata/${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
+      timeoutMs,
+    );
+    if (response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return;
+    }
+    const error = await this.parseError(response);
+    if (error.code === 'COMFY_NOT_FOUND') {
+      throw new ComfyError(404, 'WORKFLOW_NOT_FOUND', 'ComfyUI 上已找不到该工作流', error.details);
+    }
+    throw error;
+  }
+
   async getObjectInfo(force = false, timeoutMs = 60_000): Promise<Record<string, unknown>> {
     void force;
     const data = await this.requestJson<Record<string, unknown>>(

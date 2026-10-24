@@ -261,7 +261,8 @@ export class RunManager {
       resolvedSeeds: applied.resolvedSeeds,
       outputs: [],
       bypassedNodes: prepared.bypass.length ? prepared.bypass : undefined,
-      queuePosition: submitted.number,
+      // ComfyUI answers with a priority counter, not a queue position; the
+      // poller fills in the real position from queue_pending on its next tick.
       nodeLabels: runtime.nodeLabels,
     };
     this.runs.set(run.id, run);
@@ -765,14 +766,20 @@ export class RunManager {
       queue = undefined;
     }
     const queuedIds = new Set<string>();
+    const runningIds = new Set<string>();
+    const pendingPosition = new Map<string, number>();
     if (queue) {
-      const collect = (items: unknown[]): void => {
-        for (const item of items) {
-          if (Array.isArray(item) && typeof item[1] === 'string') queuedIds.add(item[1]);
+      for (const item of queue.running) {
+        if (Array.isArray(item) && typeof item[1] === 'string') {
+          runningIds.add(item[1]);
+          queuedIds.add(item[1]);
         }
-      };
-      collect(queue.running);
-      collect(queue.pending);
+      }
+      queue.pending.forEach((item, index) => {
+        if (!Array.isArray(item) || typeof item[1] !== 'string') return;
+        queuedIds.add(item[1]);
+        if (!pendingPosition.has(item[1])) pendingPosition.set(item[1], index + 1);
+      });
     }
     for (const run of active) {
       if (!run.promptId) continue;
@@ -790,21 +797,34 @@ export class RunManager {
         await this.finalizeFromHistory(run);
         continue;
       }
-      const inQueue = queuedIds.size ? queuedIds.has(run.promptId) : undefined;
-      if (inQueue === true) {
+      // ComfyUI sends execution and progress events only to the websocket of
+      // the client that submitted the prompt. If such an event is missed (the
+      // socket may be connected but unregistered under our client id), the run
+      // must not stay at 排队中 while ComfyUI is already executing it, so the
+      // queue is authoritative for the queued -> running transition.
+      if (queue && runningIds.has(run.promptId)) {
         this.missingSince.delete(run.id);
-        if (run.state === 'queued' && queue) {
-          const position = queue.pending.findIndex(
-            (item) => Array.isArray(item) && item[1] === run.promptId,
-          );
-          if (position >= 0) {
-            run.queuePosition = position + 1;
-            this.touch(run);
-          }
+        if (run.state === 'queued') {
+          run.state = 'running';
+          run.startedAt ??= nowIso();
+          run.queuePosition = undefined;
+          run.progress = { ...run.progress, message: '执行中' };
+          this.touch(run);
         }
         continue;
       }
-      if (inQueue === false) {
+      const queuedPosition = queue ? pendingPosition.get(run.promptId) : undefined;
+      if (queuedPosition !== undefined) {
+        this.missingSince.delete(run.id);
+        if (run.queuePosition !== queuedPosition) {
+          run.queuePosition = queuedPosition;
+          this.touch(run);
+        }
+        continue;
+      }
+      // An empty queue is ambiguous (idle server, or the prompt was already
+      // dropped); only a queue that lists other work proves this one is gone.
+      if (queuedIds.size) {
         const since = this.missingSince.get(run.id) ?? Date.now();
         this.missingSince.set(run.id, since);
         // Give ComfyUI a moment to populate history after the websocket's

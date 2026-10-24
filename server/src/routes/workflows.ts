@@ -7,7 +7,6 @@ import type {
 } from '@comfy-mobile/shared';
 import type { AppContext } from '../context.js';
 import { AppError } from '../errors.js';
-import { decodeWorkflowKey } from '../security.js';
 
 export function registerWorkflowRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get<{ Querystring: { refresh?: string } }>('/workflows', async (request) => {
@@ -81,11 +80,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, ctx: AppContext): v
   );
 
   app.delete<{ Params: { key: string } }>('/workflows/:key', async (request) => {
-    const decoded = decodeWorkflowKey(request.params.key);
-    if (decoded.source !== 'imported') {
-      throw new AppError(400, 'NOT_IMPORTED', '只能删除导入的工作流');
-    }
-    await ctx.workflows.deleteImported(request.params.key);
+    // Imported workflows are removed locally; ComfyUI workflows are deleted on
+    // the ComfyUI host, so this is a real, shared deletion.
+    await ctx.workflows.deleteWorkflow(request.params.key);
     return { ok: true };
   });
 

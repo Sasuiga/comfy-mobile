@@ -13,6 +13,16 @@ export function readRecentWorkflows(): string[] {
   }
 }
 
+/** Drops a workflow from the recents shortcut, e.g. after it was deleted. */
+export function forgetWorkflow(key: string): void {
+  try {
+    const next = readRecentWorkflows().filter((item) => item !== key);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  } catch {
+    // ignore
+  }
+}
+
 export function rememberWorkflow(key: string): void {
   try {
     const next = [key, ...readRecentWorkflows().filter((item) => item !== key)].slice(0, 8);

@@ -3,10 +3,12 @@ import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import type { WorkflowSummary } from '@comfy-mobile/shared';
 import { api, errorMessage } from '../api';
+import { useApp } from '../context';
 import { zh } from '../i18n';
 import { Icon, type IconName } from './Icon';
+import { SwipeRow } from './SwipeRow';
 import { Spinner } from './UI';
-import { readRecentWorkflows, rememberWorkflow } from '../recent';
+import { forgetWorkflow, readRecentWorkflows, rememberWorkflow } from '../recent';
 
 type MediaKind = 'image' | 'video' | 'audio';
 
@@ -43,6 +45,7 @@ interface WorkflowPickerProps {
  */
 export function WorkflowPicker({ open, project, onClose, onSelect }: WorkflowPickerProps) {
   const navigate = useNavigate();
+  const { showToast } = useApp();
   const [items, setItems] = useState<WorkflowSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -51,6 +54,9 @@ export function WorkflowPicker({ open, project, onClose, onSelect }: WorkflowPic
   const [mediaFilter, setMediaFilter] = useState<'all' | MediaKind>('all');
   const [recent, setRecent] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
+  /** Row id of the card whose delete action is revealed; one at a time. */
+  const [openRow, setOpenRow] = useState<string | null>(null);
+  const [removingKey, setRemovingKey] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (refresh = false): Promise<void> => {
@@ -71,6 +77,7 @@ export function WorkflowPicker({ open, project, onClose, onSelect }: WorkflowPic
     if (!open) return;
     setQuery('');
     setMediaFilter('all');
+    setOpenRow(null);
     setRecent(readRecentWorkflows());
     void load(false);
   }, [open, load]);
@@ -87,6 +94,61 @@ export function WorkflowPicker({ open, project, onClose, onSelect }: WorkflowPic
   const openWorkflow = (key: string): void => {
     rememberWorkflow(key);
     onSelect(key);
+  };
+
+  /**
+   * ComfyUI workflows are deleted on the ComfyUI host, so this is a real,
+   * shared deletion; imported ones only remove the local copy.
+   */
+  const remove = async (item: WorkflowSummary): Promise<void> => {
+    setOpenRow(null);
+    const confirmText =
+      item.source === 'imported'
+        ? `删除导入的工作流「${item.name}」及其预设？`
+        : `删除工作流「${item.name}」？\n\n这会同时从 ComfyUI 删除该工作流文件，` +
+          '其他客户端也将看不到它，且无法撤销。';
+    if (!window.confirm(confirmText)) return;
+    setRemovingKey(item.key);
+    setError(null);
+    try {
+      await api.deleteWorkflow(item.key);
+      setItems((current) => current.filter((entry) => entry.key !== item.key));
+      setRecent((current) => current.filter((key) => key !== item.key));
+      forgetWorkflow(item.key);
+      showToast('工作流已删除', 'success');
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setRemovingKey(null);
+    }
+  };
+
+  const renderCard = (item: WorkflowSummary, rowId: string) => {
+    const revealed = openRow === rowId;
+    const removing = removingKey === item.key;
+    return (
+      <SwipeRow
+        key={rowId}
+        open={revealed}
+        onOpenChange={(next) => setOpenRow(next ? rowId : null)}
+        action={
+          <button
+            type="button"
+            className="swipe-delete"
+            aria-label={`删除工作流「${item.name}」`}
+            aria-hidden={!revealed}
+            tabIndex={revealed ? 0 : -1}
+            disabled={removing}
+            onClick={() => void remove(item)}
+          >
+            {removing ? <Spinner size={18} /> : <Icon name="trash" size={20} />}
+            <span>{zh.common.delete}</span>
+          </button>
+        }
+      >
+        <WorkflowCard item={item} onOpen={openWorkflow} />
+      </SwipeRow>
+    );
   };
 
   const mediaCounts = useMemo(() => {
@@ -289,13 +351,9 @@ export function WorkflowPicker({ open, project, onClose, onSelect }: WorkflowPic
                 <section className="workflow-section">
                   <h2 className="section-label">{zh.workflow.recent}</h2>
                   <div className="workflow-list">
-                    {recentItems.slice(0, 3).map((item) => (
-                      <WorkflowCard
-                        key={`recent-${item.key}`}
-                        item={item}
-                        onOpen={openWorkflow}
-                      />
-                    ))}
+                    {recentItems
+                      .slice(0, 3)
+                      .map((item) => renderCard(item, `recent-${item.key}`))}
                   </div>
                 </section>
               ) : null}
@@ -309,9 +367,7 @@ export function WorkflowPicker({ open, project, onClose, onSelect }: WorkflowPic
                   <p className="picker-empty">没有匹配的工作流</p>
                 ) : (
                   <div className="workflow-list">
-                    {filtered.map((item) => (
-                      <WorkflowCard key={item.key} item={item} onOpen={openWorkflow} />
-                    ))}
+                    {filtered.map((item) => renderCard(item, item.key))}
                   </div>
                 )}
               </section>

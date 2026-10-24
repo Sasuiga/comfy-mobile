@@ -271,6 +271,38 @@ describe('API integration with mock ComfyUI', () => {
     expect((await app.inject({ method: 'GET', url: '/api/runs' })).json().items).toHaveLength(1);
   });
 
+  it('still reports a run as executing when no websocket event arrives', async () => {
+    // ComfyUI sends execution events only to the submitting client's socket, so
+    // a stale registration silences the whole run. The queue must still move it
+    // out of 排队中 while it is in queue_running.
+    const mock = await startMock({ stepDelayMs: 400, broadcastEvents: false });
+    const { app } = await startApp(mock.url);
+    const items = (
+      await app.inject({ method: 'GET', url: '/api/workflows?refresh=1' })
+    ).json().items as WorkflowSummary[];
+    const key = items.find((item) => item.name === 'txt2img-ui')!.key;
+
+    const submitted = await app.inject({
+      method: 'POST',
+      url: '/api/runs',
+      payload: { workflowKey: key },
+    });
+    expect(submitted.statusCode, submitted.body).toBe(200);
+    const runId = (submitted.json() as { runId: string }).runId;
+
+    const running = await waitFor(async () => {
+      const response = await app.inject({ method: 'GET', url: `/api/runs/${runId}` });
+      const run = response.json() as {
+        state: string;
+        startedAt?: string;
+        queuePosition?: number;
+      };
+      return run.state === 'running' ? run : undefined;
+    }, 10_000);
+    expect(running.startedAt, JSON.stringify(running)).toBeTruthy();
+    expect(running.queuePosition).toBeUndefined();
+  }, 20_000);
+
   it('treats a fresh ComfyUI without a workflows directory as an empty list', async () => {
     const mock = await startMock({ emptyUserData: true });
     const { app } = await startApp(mock.url);
@@ -380,6 +412,68 @@ describe('API integration with mock ComfyUI', () => {
     });
     expect(imported.statusCode).toBe(200);
     expect((imported.json().item as WorkflowSummary).source).toBe('imported');
+  });
+
+  it('deletes a ComfyUI workflow on the ComfyUI host', async () => {
+    const mock = await startMock();
+    const { app } = await startApp(mock.url);
+    const items = (
+      await app.inject({ method: 'GET', url: '/api/workflows?refresh=1' })
+    ).json().items as WorkflowSummary[];
+    const target = items.find((item) => item.name === 'txt2img-ui')!;
+    expect(target.source).toBe('remote');
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/workflows/${encodeURIComponent(target.key)}`,
+    });
+    expect(removed.statusCode, removed.body).toBe(200);
+
+    const remaining = (
+      await app.inject({ method: 'GET', url: '/api/workflows?refresh=1' })
+    ).json().items as WorkflowSummary[];
+    expect(remaining.some((item) => item.path === target.path)).toBe(false);
+    // The file is gone on ComfyUI itself, not merely hidden from our list.
+    expect(
+      (
+        await app.inject({
+          method: 'GET',
+          url: `/api/workflows/${encodeURIComponent(target.key)}`,
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await app.inject({
+          method: 'DELETE',
+          url: `/api/workflows/${encodeURIComponent(target.key)}`,
+        })
+      ).statusCode,
+    ).toBe(404);
+  });
+
+  it('deletes imported workflows locally and leaves ComfyUI untouched', async () => {
+    const mock = await startMock();
+    const { app } = await startApp(mock.url);
+    const imported = (
+      await app.inject({
+        method: 'POST',
+        url: '/api/workflows/import',
+        payload: { name: '本地副本', workflow: mockApiWorkflow },
+      })
+    ).json().item as WorkflowSummary;
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/api/workflows/${encodeURIComponent(imported.key)}`,
+    });
+    expect(removed.statusCode, removed.body).toBe(200);
+
+    const items = (
+      await app.inject({ method: 'GET', url: '/api/workflows?refresh=1' })
+    ).json().items as WorkflowSummary[];
+    expect(items.some((item) => item.key === imported.key)).toBe(false);
+    expect(items.filter((item) => item.source === 'remote')).toHaveLength(2);
   });
 
   it('lists official templates and imports one as a UI workflow', async () => {

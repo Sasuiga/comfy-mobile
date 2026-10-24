@@ -100,7 +100,9 @@ export function decodeWorkflowKey(key: string): { source: 'remote' | 'imported';
   }
   if (key.startsWith('i:')) {
     const path = Buffer.from(key.slice(2), 'base64url').toString('utf8');
-    if (!/^[A-Za-z0-9._-]+\.json$/.test(path)) {
+    // Imported file names keep the title the user typed, usually Chinese, so
+    // this has to accept Unicode letters and digits (see importWorkflow).
+    if (!/^[\p{L}\p{N}._-]+\.json$/u.test(path)) {
       throw new AppError(400, 'INVALID_WORKFLOW_KEY', '导入工作流标识不合法');
     }
     return { source: 'imported', path };

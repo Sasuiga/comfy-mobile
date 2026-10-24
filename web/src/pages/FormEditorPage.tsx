@@ -205,8 +205,13 @@ export function FormEditorPage() {
   };
 
   const removeWorkflow = async (): Promise<void> => {
-    if (!detail || detail.source !== 'imported') return;
-    if (!window.confirm(`删除导入的工作流「${detail.name}」及其预设？`)) return;
+    if (!detail) return;
+    const confirmText =
+      detail.source === 'imported'
+        ? `删除导入的工作流「${detail.name}」及其预设？`
+        : `删除工作流「${detail.name}」？\n\n这会同时从 ComfyUI 删除该工作流文件，` +
+          '其他客户端也将看不到它，且无法撤销。';
+    if (!window.confirm(confirmText)) return;
     try {
       await api.deleteWorkflow(key);
       showToast('工作流已删除', 'success');
@@ -386,12 +391,14 @@ export function FormEditorPage() {
         {filtered.length === 0 ? <p className="muted-note">没有匹配的字段。</p> : null}
       </div>
 
-      {detail.source === 'imported' ? (
-        <button type="button" className="text-button danger remove-workflow" onClick={() => void removeWorkflow()}>
-          <Icon name="trash" size={16} />
-          删除这个导入的工作流
-        </button>
-      ) : null}
+      <button
+        type="button"
+        className="text-button danger remove-workflow"
+        onClick={() => void removeWorkflow()}
+      >
+        <Icon name="trash" size={16} />
+        {detail.source === 'imported' ? '删除这个导入的工作流' : '从 ComfyUI 删除这个工作流'}
+      </button>
 
       <div className="run-bar editor-bar">
         <button

@@ -16,7 +16,7 @@ import type { ComfyClient } from '../comfy/client.js';
 import type { AssetStore } from '../assets/store.js';
 import type { JsonStore } from '../store/jsonStore.js';
 import { AppError, toErrorMessage } from '../errors.js';
-import { shortHash } from '../security.js';
+import { decodeWorkflowKey, shortHash } from '../security.js';
 import { clearConversionCache, convertWorkflow, nodeLabelMap } from './convert.js';
 import type { WorkflowRepository, RawWorkflow } from './repository.js';
 import { buildFormSchema, type BuiltSchema } from './schema.js';
@@ -332,6 +332,22 @@ export class WorkflowService {
 
   async deleteImported(key: string): Promise<void> {
     await this.repository.deleteImported(key);
+    await this.resetOverrides(key);
+    await this.store.remove(`presets/${hashKey(key)}.json`);
+  }
+
+  /**
+   * Deletes a workflow: imported ones are local copies, ComfyUI ones are the
+   * saved file itself (removed on the ComfyUI host). Form overrides and presets
+   * belong to the key either way and go with it.
+   */
+  async deleteWorkflow(key: string): Promise<void> {
+    const decoded = decodeWorkflowKey(key);
+    if (decoded.source === 'imported') {
+      await this.repository.deleteImported(key);
+    } else {
+      await this.repository.deleteRemote(key);
+    }
     await this.resetOverrides(key);
     await this.store.remove(`presets/${hashKey(key)}.json`);
   }

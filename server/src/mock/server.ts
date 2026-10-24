@@ -21,6 +21,12 @@ export interface MockComfyOptions {
   templates?: Record<string, unknown>;
   /** Simulate a fresh ComfyUI with no user/default/workflows directory. */
   emptyUserData?: boolean;
+  /**
+   * Send execution/progress events on the websocket. Disable to reproduce a
+   * client that misses every event, as when ComfyUI no longer has it
+   * registered as the prompt's submitting client.
+   */
+  broadcastEvents?: boolean;
 }
 
 interface MockJob {
@@ -149,7 +155,8 @@ function parseJobIndex(path: string): string | null {
 export async function createMockComfyServer(
   options: MockComfyOptions = {},
 ): Promise<MockComfyServer> {
-  const workflows = options.workflows ?? MOCK_WORKFLOWS;
+  // Copied because deleting a workflow removes it from this mock's store.
+  const workflows: Record<string, unknown> = { ...(options.workflows ?? MOCK_WORKFLOWS) };
   const objectInfo = options.objectInfo ?? (mockObjectInfo as unknown as Record<string, unknown>);
   const templates = options.templates ?? MOCK_TEMPLATES;
   const templateIndex = MOCK_TEMPLATE_INDEX.filter((group) =>
@@ -181,7 +188,10 @@ export async function createMockComfyServer(
     return timer;
   };
 
+  const broadcastEvents = options.broadcastEvents ?? true;
+
   const broadcast = (type: string, data: Record<string, unknown>): void => {
+    if (!broadcastEvents) return;
     const message = JSON.stringify({ type, data });
     for (const client of state.clients) {
       if (client.readyState === WebSocket.OPEN) client.send(message);
@@ -429,6 +439,23 @@ export async function createMockComfyServer(
         return;
       }
       sendJson(response, 200, { content: JSON.stringify(workflow) });
+      return;
+    }
+
+    if (method === 'DELETE' && path.startsWith('/userdata/')) {
+      const encoded = path.slice('/userdata/'.length);
+      if (!encoded || encoded.includes('/')) {
+        sendJson(response, 404, { error: { message: 'workflow not found' } });
+        return;
+      }
+      const workflowPath = decodeURIComponent(encoded);
+      if (workflows[workflowPath] === undefined) {
+        sendJson(response, 404, { error: { message: 'workflow not found' } });
+        return;
+      }
+      delete workflows[workflowPath];
+      response.writeHead(204);
+      response.end();
       return;
     }
 

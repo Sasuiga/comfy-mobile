@@ -265,6 +265,38 @@ export class WorkflowRepository {
     await this.refreshImported();
   }
 
+  /**
+   * Deletes a workflow that lives in ComfyUI's userdata. The file is removed on
+   * the ComfyUI host, so it disappears for every client, not only for us.
+   */
+  async deleteRemote(key: string): Promise<void> {
+    const decoded = decodeWorkflowKey(key);
+    if (decoded.source !== 'remote') {
+      throw new AppError(400, 'NOT_REMOTE', '只能删除 ComfyUI 上的工作流');
+    }
+    const path = validateRemoteWorkflowPath(decoded.path);
+    if (!this.allowedRemotePaths.has(path)) {
+      // Deletion is never guessed: the path has to come from a fresh listing.
+      await this.list(true).catch(() => undefined);
+    }
+    if (!this.allowedRemotePaths.has(path)) {
+      throw new AppError(404, 'WORKFLOW_NOT_FOUND', '工作流不存在，请刷新工作流列表');
+    }
+    try {
+      await this.client.deleteWorkflowFile(path);
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(502, 'WORKFLOW_DELETE_FAILED', `删除工作流失败：${toErrorMessage(error)}`);
+    }
+    this.allowedRemotePaths.delete(path);
+    this.items = this.items.filter(
+      (item) => !(item.source === 'remote' && item.path === path),
+    );
+    // The file is gone, so keep the fresh list instead of re-fetching now.
+    this.fetchedAt = Date.now();
+    await this.persist();
+  }
+
   async invalidate(): Promise<void> {
     this.fetchedAt = 0;
     this.loading = undefined;

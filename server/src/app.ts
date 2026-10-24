@@ -90,6 +90,18 @@ export async function buildApp(buildOptions: BuildAppOptions = {}): Promise<Buil
     runs,
   };
 
+  // ComfyUI only sends execution events to the socket registered under the
+  // submitting client id, and it registers one socket per client id. A silent
+  // reconnect is therefore the main way run progress can go stale, so leave a
+  // trace in the log when the connection changes state.
+  let socketConnected: boolean | undefined;
+  socket.on('status', (status) => {
+    if (status.connected === socketConnected) return;
+    socketConnected = status.connected;
+    if (status.connected) app.log.info('comfy websocket connected');
+    else app.log.warn({ error: status.error }, 'comfy websocket disconnected');
+  });
+
   const authHook = requireAuth(configService.authToken);
   const originHook = sameOriginGuard();
 
