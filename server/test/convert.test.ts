@@ -54,3 +54,112 @@ describe('workflow conversion', () => {
     );
   });
 });
+
+/**
+ * `ShowText|pysssss` has a single socket-only `text` input (no widget slots), yet
+ * ComfyUI still writes the linked value into `widgets_values`. The converter
+ * reports that leftover as possible widget misalignment, which the UI escalates
+ * to "re-save this workflow before running".
+ */
+const socketInfo = {
+  ...objectInfo,
+  PrimitiveString: {
+    input: { required: { value: ['STRING', { default: '' }] } },
+    input_order: { required: ['value'] },
+    output: ['STRING'],
+    output_name: ['STRING'],
+    name: 'PrimitiveString',
+    display_name: 'String',
+    category: 'utils',
+  },
+  'ShowText|pysssss': {
+    input: { required: { text: ['STRING', { forceInput: true }] } },
+    input_order: { required: ['text'] },
+    output: ['STRING'],
+    output_name: ['STRING'],
+    name: 'ShowText|pysssss',
+    display_name: 'Show Text',
+    category: 'utils',
+  },
+  TextWithPrefix: {
+    input: {
+      required: {
+        text: ['STRING', { forceInput: true }],
+        prefix: ['STRING', { default: '' }],
+      },
+    },
+    input_order: { required: ['text', 'prefix'] },
+    output: ['STRING'],
+    output_name: ['STRING'],
+    name: 'TextWithPrefix',
+    display_name: 'Text With Prefix',
+    category: 'utils',
+  },
+} as unknown as Record<string, unknown>;
+
+function textChain(consumerType: string, widgetsValues: unknown[]) {
+  return {
+    last_node_id: 2,
+    last_link_id: 1,
+    nodes: [
+      {
+        id: 1,
+        type: 'PrimitiveString',
+        pos: [80, 80],
+        size: [315, 106],
+        flags: {},
+        order: 0,
+        mode: 0,
+        inputs: [],
+        outputs: [{ name: 'STRING', type: 'STRING', links: [1], slot_index: 0 }],
+        properties: {},
+        widgets_values: ['linked text'],
+      },
+      {
+        id: 2,
+        type: consumerType,
+        pos: [440, 80],
+        size: [315, 106],
+        flags: {},
+        order: 1,
+        mode: 0,
+        inputs: [{ name: 'text', type: 'STRING', link: 1 }],
+        outputs: [],
+        properties: {},
+        widgets_values: widgetsValues,
+      },
+    ],
+    links: [[1, 1, 0, 2, 0, 'STRING']],
+    groups: [],
+    config: {},
+    extra: {},
+    version: 0.4,
+  };
+}
+
+describe('forceInput leftovers', () => {
+  it('does not report widget misalignment on a node without widget slots', () => {
+    const result = convertWorkflow(textChain('ShowText|pysssss', ['linked text']), socketInfo);
+    expect(result.prompt['2']?.inputs.text).toEqual(['1', 0]);
+    expect(result.warnings.join('\n')).not.toMatch(/remain unmapped|one position early/);
+    expect(result.warnings).toContain(
+      'Node 2 (ShowText|pysssss): 1 个多余的序列化值被忽略——该节点只有输入端口，没有可错位的参数',
+    );
+  });
+
+  it('reports no warning at all when the node serialized nothing extra', () => {
+    const result = convertWorkflow(textChain('ShowText|pysssss', []), socketInfo);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('keeps the misalignment warning when the node really has widget slots', () => {
+    const result = convertWorkflow(
+      textChain('TextWithPrefix', ['PRE', 'leftover']),
+      socketInfo,
+    );
+    expect(result.prompt['2']?.inputs.prefix).toBe('PRE');
+    expect(result.warnings.some((w) => /remain unmapped/.test(w) && /one position early/.test(w))).toBe(
+      true,
+    );
+  });
+});

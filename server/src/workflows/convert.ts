@@ -107,7 +107,7 @@ export function convertWorkflow(
     result = {
       prompt: converted.workflow as ApiPrompt,
       format,
-      warnings: converted.warnings ?? [],
+      warnings: relaxVacuousShiftWarnings(converted.warnings ?? [], objectInfo),
       missingNodeTypes: converted.missingNodeTypes ?? [],
       potentiallyExecutableNodeCount: converted.potentiallyExecutableNodeCount ?? 0,
     };
@@ -130,6 +130,75 @@ export function convertWorkflow(
     ...result,
     prompt: structuredClone(result.prompt),
   };
+}
+
+const UNMAPPED_FORCE_INPUT_WARNING =
+  /^Node (\S+) \((.+?)\): (\d+) saved widget value\(s\) remain unmapped[\s\S]*forceInput-only input/;
+
+const WIDGET_TYPES = new Set(['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO']);
+
+/** Mirrors the converter's notion of a spec that maps to a widget slot. */
+function isPositionalWidgetSpec(spec: unknown): boolean {
+  if (!Array.isArray(spec)) return false;
+  const type = spec[0];
+  if (Array.isArray(type)) return true; // inline combo options
+  const cfg = spec[1] as Record<string, unknown> | undefined;
+  if (Array.isArray(cfg?.options)) return true; // dynamic combo
+  if (typeof cfg?.widgetType === 'string' && WIDGET_TYPES.has(cfg.widgetType)) {
+    return true;
+  }
+  if (typeof type !== 'string') return false;
+  if (WIDGET_TYPES.has(type)) return true;
+  if (!type.includes(',')) return false;
+  const parts = type.split(',').map((part) => part.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every((part) => WIDGET_TYPES.has(part));
+}
+
+/** `forceInput` (any type) or a deprecated optional `defaultInput` hides the slot. */
+function isSocketOnlySpec(spec: unknown, optional: boolean): boolean {
+  if (!Array.isArray(spec)) return false;
+  const cfg = spec[1] as Record<string, unknown> | undefined;
+  if (cfg?.forceInput === true) return true;
+  return optional && cfg?.defaultInput === true;
+}
+
+/** True when the class owns at least one slot a saved row could shift into. */
+function classHasWidgetSlots(def: unknown): boolean {
+  if (!def || typeof def !== 'object') return false;
+  const input = (def as { input?: { required?: unknown; optional?: unknown } }).input;
+  const required = (input?.required ?? {}) as Record<string, unknown>;
+  const optional = (input?.optional ?? {}) as Record<string, unknown>;
+  for (const [name, spec] of Object.entries(required)) {
+    if (isPositionalWidgetSpec(spec) && !isSocketOnlySpec(spec, false)) return true;
+  }
+  for (const [name, spec] of Object.entries(optional)) {
+    if (name in required) continue;
+    if (isPositionalWidgetSpec(spec) && !isSocketOnlySpec(spec, true)) return true;
+  }
+  return false;
+}
+
+/**
+ * The converter reports any leftover `widgets_values` entry on a node that also
+ * has a forceInput-only input as "every widget on this node is reading one
+ * position early". That only holds when the node has widget slots at all:
+ * display nodes such as `ShowText|pysssss` (a single socket-only `text` input)
+ * still serialize a linked value into `widgets_values`, and nothing on them can
+ * move. Report those leftovers, but do not call them parameter misalignment —
+ * the UI escalates that wording to "do not run until you re-save".
+ */
+function relaxVacuousShiftWarnings(
+  warnings: string[],
+  objectInfo: Record<string, unknown>,
+): string[] {
+  return warnings.map((warning) => {
+    const match = UNMAPPED_FORCE_INPUT_WARNING.exec(warning);
+    if (!match || classHasWidgetSlots(objectInfo[match[2]!])) return warning;
+    return (
+      `Node ${match[1]} (${match[2]}): ${match[3]} 个多余的序列化值被忽略` +
+      '——该节点只有输入端口，没有可错位的参数'
+    );
+  });
 }
 
 export function clearConversionCache(): void {
