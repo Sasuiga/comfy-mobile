@@ -536,6 +536,42 @@ describe('form schema', () => {
     expect(warnings).toContain('not installed on the connected server');
   });
 
+  it('never caps a text field below the value the workflow was saved with', () => {
+    // Qwen-style pipelines embed long fixed prompts; the form resends them on
+    // every run, so a UI cap below the saved length would block the workflow.
+    const long = `固定提示词${'x'.repeat(17_000)}`;
+    const prompt = {
+      '1': { class_type: 'EasyPositive', inputs: { positive: long } },
+      '2': { class_type: 'EasyPositive', inputs: { positive: 'short prompt' } },
+    };
+    const objectInfo = {
+      EasyPositive: {
+        input: { required: { positive: ['STRING', { multiline: true }] } },
+        input_order: { required: ['positive'] },
+        output: ['CONDITIONING'],
+      },
+    } as unknown as Record<string, unknown>;
+
+    const schema = buildFormSchema({
+      workflowKey: 'test-key',
+      summary,
+      workflow: { nodes: [] },
+      prompt,
+      objectInfo,
+      overrides: null,
+      warnings: [],
+      missingNodeTypes: [],
+    });
+
+    const savedLong = field(schema.fields, '1.positive');
+    expect(savedLong.kind).toBe('textarea');
+    expect(savedLong.default).toBe(long);
+    expect(savedLong.constraints.maxLength).toBe(long.length);
+
+    // Ordinary fields keep the default UI cap.
+    expect(field(schema.fields, '2.positive').constraints.maxLength).toBe(10_000);
+  });
+
   it('marks a node bypassable only when required consumers can pass through', () => {
     const prompt = {
       '1': { class_type: 'BaseModel', inputs: {} },

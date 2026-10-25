@@ -754,6 +754,13 @@ function constraintsFor(
     constraints.maxLength ??= 10_000;
   }
   if (kind === 'text') constraints.maxLength ??= 4_000;
+  // The length cap is a guard on new input, not a judgement on the workflow's
+  // own content: long fixed prompts (Qwen/Flux pipelines routinely embed them)
+  // are legitimate. A cap below the saved value would reject the untouched
+  // field at run time, so it can never be the smaller of the two.
+  if (typeof value === 'string' && constraints.maxLength !== undefined) {
+    constraints.maxLength = Math.max(constraints.maxLength, value.length);
+  }
   if (kind === 'select' && !constraints.options) constraints.options = [];
   return constraints;
 }

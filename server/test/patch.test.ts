@@ -232,6 +232,37 @@ describe('value patching', () => {
     });
   });
 
+  it('accepts an untouched value that exceeds the UI length cap but rejects edits', () => {
+    // A schema built before a cap was raised (or a preset from another client)
+    // can still carry maxLength below the workflow's own saved prompt.
+    const saved = 'x'.repeat(12_000);
+    const longField: Field = {
+      key: '1.positive',
+      nodeId: '1',
+      input: 'positive',
+      widgetName: 'positive',
+      kind: 'textarea',
+      label: '正向提示词',
+      group: 'prompt',
+      order: 0,
+      required: true,
+      default: saved,
+      constraints: { multiline: true, maxLength: 10_000 },
+      visible: true,
+      advanced: false,
+      source: 'heuristic',
+    };
+    const prompt = { '1': { class_type: 'EasyPositive', inputs: { positive: saved } } };
+
+    const result = applyValues(prompt, [longField], { '1.positive': saved }, false);
+    expect(result.prompt['1']?.inputs.positive).toBe(saved);
+
+    // Real edits are still bounded, so a client cannot smuggle in unbounded text.
+    expect(() =>
+      applyValues(prompt, [longField], { '1.positive': `${saved}y` }, false),
+    ).toThrowError(/超出长度限制/);
+  });
+
   it('submits numeric combo options with their declared type', () => {
     const selectField: Field = {
       key: '9.bit_depth',

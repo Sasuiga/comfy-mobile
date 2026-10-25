@@ -222,7 +222,11 @@ function coerce(field: Field, raw: unknown): unknown {
     case 'textarea': {
       const value = String(raw);
       const max = field.constraints.maxLength;
-      if (max !== undefined && value.length > max) {
+      // A value identical to the workflow's saved one is authored content; the
+      // form resends it untouched for every run. Only edited input is subject
+      // to the cap, so a long fixed prompt can never block its own workflow.
+      const unchanged = typeof field.default === 'string' && value === field.default;
+      if (!unchanged && max !== undefined && value.length > max) {
         throw new AppError(400, 'VALUE_TOO_LONG', `${field.label} 超出长度限制`, {
           key: field.key,
         });
